@@ -411,9 +411,11 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
     use ratatui::layout::Rect;
 
+    #[cfg(target_os = "linux")]
+    use super::super::wait_for_detached_process_reap;
     use super::super::{app_for_mouse_test, mouse, numbered_lines_bytes};
     #[cfg(unix)]
-    use super::super::{unique_temp_path, wait_for_detached_process_reap, wait_for_file};
+    use super::super::{unique_temp_path, wait_for_file};
     use super::*;
     use crate::{config::Config, events::AppEvent, workspace::Workspace};
 
