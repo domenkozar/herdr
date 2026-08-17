@@ -550,6 +550,8 @@ Herdr 在本地 socket 上使用换行分隔的 JSON。在 Unix 上,那个 socke
 }
 ```
 
+Herdr 管理的集成还可以发送 `reporter_pid`。对于受支持的官方来源/智能体组合,服务器可以使用这个短生命周期 PID 将身份绑定到上报者的实时前台作业。该字段不会授予状态权威,并且对不受支持或自定义的来源会被忽略。
+
 Herdr 存有原生会话引用时,`pane.get`、`pane.list`、`agent.get` 和 `agent.list` 暴露一个只读的 `agent_session` 对象:
 
 ```json

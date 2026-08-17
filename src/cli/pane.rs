@@ -1365,6 +1365,7 @@ fn pane_report_agent_session(args: &[String]) -> std::io::Result<i32> {
             agent_session_id,
             agent_session_path,
             session_start_source,
+            reporter_pid: None,
         },
     ))
 }

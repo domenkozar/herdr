@@ -173,6 +173,27 @@ pub fn foreground_process_group_id(_child_pid: u32) -> Option<u32> {
     None
 }
 
+pub(crate) fn resolve_hook_process_binding(
+    _pane_shell_pid: u32,
+    _reporter_pid: u32,
+) -> Option<super::HookProcessBinding> {
+    None
+}
+
+pub(crate) fn hook_process_binding_is_live(
+    _pane_shell_pid: u32,
+    _binding: &super::HookProcessBinding,
+) -> bool {
+    false
+}
+
+pub(crate) fn validate_hook_process_binding(
+    _pane_shell_pid: u32,
+    _binding: &super::HookProcessBinding,
+) -> Option<ForegroundJob> {
+    None
+}
+
 /// Unsupported platform stub.
 pub fn process_cwd(_pid: u32) -> Option<PathBuf> {
     None

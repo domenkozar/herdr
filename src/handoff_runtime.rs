@@ -27,6 +27,15 @@ pub(crate) struct HandoffRuntimeState {
     pub terminal_title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_history_ansi: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_identity_hint: Option<HandoffAgentIdentityHint>,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct HandoffAgentIdentityHint {
+    pub agent: String,
+    pub process: crate::platform::HookProcessBinding,
 }
 
 #[cfg(unix)]
@@ -43,4 +52,22 @@ pub(crate) struct ImportedHandoffRuntime {
     pub master_fd: std::os::fd::RawFd,
     #[cfg(unix)]
     pub state: HandoffRuntimeState,
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    #[test]
+    fn legacy_handoff_without_agent_identity_hint_remains_compatible() {
+        let state: super::HandoffRuntimeState = serde_json::from_value(serde_json::json!({
+            "pane_id": 1,
+            "child_pid": 2,
+            "rows": 24,
+            "cols": 80,
+            "cell_width_px": 0,
+            "cell_height_px": 0
+        }))
+        .unwrap();
+
+        assert!(state.agent_identity_hint.is_none());
+    }
 }

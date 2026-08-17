@@ -324,6 +324,31 @@ impl App {
                 }
             }
         }
+        for (pane_id, agent, binding) in
+            std::mem::take(&mut self.state.pending_agent_identity_bindings)
+        {
+            if let Some((ws_idx, _)) = self.find_pane(pane_id) {
+                if let Some(runtime) = self.state.runtime_for_pane_in_workspace(
+                    &self.terminal_runtimes,
+                    ws_idx,
+                    pane_id,
+                ) {
+                    if runtime.install_agent_identity_binding(agent, binding) {
+                        tracing::debug!(
+                            pane = pane_id.raw(),
+                            agent = crate::detect::agent_label(agent),
+                            "installed process-bound agent identity"
+                        );
+                    } else {
+                        tracing::debug!(
+                            pane = pane_id.raw(),
+                            agent = crate::detect::agent_label(agent),
+                            "accepted agent session but its process binding expired"
+                        );
+                    }
+                }
+            }
+        }
         self.sync_full_lifecycle_authority_detection_pauses();
         if terminal_cwd_reported {
             self.request_git_identity_refresh(Instant::now());

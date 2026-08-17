@@ -723,6 +723,8 @@ Session-only official integrations report native session references with `pane.r
 }
 ```
 
+Herdr-managed integrations may also send `reporter_pid`. For supported official source/agent pairs, the server can use that short-lived PID to bind identity to the reporter's live foreground job. The field does not grant state authority and is ignored for unsupported or custom sources.
+
 `pane.get`, `pane.list`, `agent.get`, and `agent.list` expose a read-only `agent_session` object when Herdr has a stored native session reference:
 
 ```json

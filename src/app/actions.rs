@@ -2845,18 +2845,34 @@ impl AppState {
                 seq,
                 session_ref,
                 session_start_source,
-            } => self
-                .update_terminal_state(pane_id, |terminal| {
-                    terminal.set_agent_session_ref_for_session_start(
-                        source,
-                        agent_label,
-                        session_ref,
-                        seq,
-                        session_start_source,
-                    )
-                })
-                .into_iter()
-                .collect(),
+                identity_binding,
+            } => {
+                let verified_foreground_agent = identity_binding.as_ref().map(|(agent, _)| *agent);
+                let pending_identity_binding =
+                    identity_binding.map(|(agent, binding)| (pane_id, agent, binding));
+                let mut accepted = false;
+                let updates = self
+                    .update_terminal_state(pane_id, |terminal| {
+                        let mutation = terminal
+                            .set_agent_session_ref_for_session_start_with_verified_agent(
+                                source,
+                                agent_label,
+                                session_ref,
+                                seq,
+                                session_start_source,
+                                verified_foreground_agent,
+                            );
+                        accepted = mutation.is_some();
+                        mutation
+                    })
+                    .into_iter()
+                    .collect();
+                if accepted {
+                    self.pending_agent_identity_bindings
+                        .extend(pending_identity_binding);
+                }
+                updates
+            }
             AppEvent::HookMetadataReported {
                 pane_id,
                 source,
@@ -5531,6 +5547,46 @@ mod tests {
 
         assert!(second_updates.is_empty());
         assert!(state.session_dirty);
+    }
+
+    #[test]
+    fn accepted_invisible_session_report_queues_runtime_identity_binding() {
+        let mut state = app_with_workspaces(&["active"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let binding = crate::platform::HookProcessBinding {
+            process_group_id: 91,
+            generation: 4,
+        };
+
+        let updates = state.handle_app_event(AppEvent::AgentSessionReported {
+            pane_id,
+            source: "herdr:codex".into(),
+            agent_label: "codex".into(),
+            seq: Some(10),
+            session_ref: crate::agent_resume::AgentSessionRef::id("codex-session"),
+            session_start_source: Some("startup".into()),
+            identity_binding: Some((Agent::Codex, binding.clone())),
+        });
+
+        assert!(updates.is_empty());
+        assert_eq!(
+            state.pending_agent_identity_bindings,
+            vec![(pane_id, Agent::Codex, binding.clone())]
+        );
+
+        state.pending_agent_identity_bindings.clear();
+        let stale = state.handle_app_event(AppEvent::AgentSessionReported {
+            pane_id,
+            source: "herdr:codex".into(),
+            agent_label: "codex".into(),
+            seq: Some(10),
+            session_ref: crate::agent_resume::AgentSessionRef::id("stale-session"),
+            session_start_source: Some("startup".into()),
+            identity_binding: Some((Agent::Codex, binding)),
+        });
+
+        assert!(stale.is_empty());
+        assert!(state.pending_agent_identity_bindings.is_empty());
     }
 
     #[test]

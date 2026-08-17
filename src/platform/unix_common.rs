@@ -209,6 +209,52 @@ fn datetime_from_tm(value: &libc::tm) -> Option<time::PrimitiveDateTime> {
     Some(time::PrimitiveDateTime::new(date, time))
 }
 
+/// Bind a hook report to the pane's current foreground job.
+///
+/// The reporter must run inside that job and the job must be distinct from the
+/// pane shell's own group, otherwise the report says nothing about which
+/// program is in the foreground. Callers supply the OS primitives.
+pub(crate) fn resolve_hook_process_binding(
+    foreground_pgid: Option<u32>,
+    shell_pgid: Option<u32>,
+    reporter_pgid: Option<u32>,
+    start_token: impl FnOnce(u32) -> Option<u64>,
+) -> Option<super::HookProcessBinding> {
+    let foreground_pgid = foreground_pgid?;
+    if shell_pgid? == foreground_pgid || reporter_pgid? != foreground_pgid {
+        return None;
+    }
+    Some(super::HookProcessBinding {
+        process_group_id: foreground_pgid,
+        generation: start_token(foreground_pgid)?,
+    })
+}
+
+/// Cheap liveness check: the bound job is still the pane's foreground job and
+/// its group leader was never replaced by a recycled process id.
+pub(crate) fn hook_process_binding_is_live(
+    binding: &super::HookProcessBinding,
+    foreground_pgid: Option<u32>,
+    start_token: impl FnOnce(u32) -> Option<u64>,
+) -> bool {
+    foreground_pgid == Some(binding.process_group_id)
+        && start_token(binding.process_group_id) == Some(binding.generation)
+}
+
+/// Liveness check plus the materialized job. Prefer
+/// [`hook_process_binding_is_live`] when the job itself is not needed.
+pub(crate) fn validate_hook_process_binding(
+    binding: &super::HookProcessBinding,
+    foreground_pgid: Option<u32>,
+    start_token: impl FnOnce(u32) -> Option<u64>,
+    foreground_job: impl FnOnce() -> Option<super::ForegroundJob>,
+) -> Option<super::ForegroundJob> {
+    hook_process_binding_is_live(binding, foreground_pgid, start_token)
+        .then(foreground_job)
+        .flatten()
+        .filter(|job| job.process_group_id == binding.process_group_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,5 +263,41 @@ mod tests {
     fn remote_ssh_config_dir_rejects_overlong_control_socket_name() {
         let err = create_remote_ssh_config_dir(&"x".repeat(200)).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn hook_binding_requires_a_foreground_job_distinct_from_the_pane_shell() {
+        // Reporter sits in the pane's foreground job: bindable.
+        assert_eq!(
+            resolve_hook_process_binding(Some(99), Some(42), Some(99), |_| Some(7)),
+            Some(super::super::HookProcessBinding {
+                process_group_id: 99,
+                generation: 7,
+            })
+        );
+        // Foreground job is the shell itself: nothing to bind to.
+        assert!(resolve_hook_process_binding(Some(42), Some(42), Some(42), |_| Some(7)).is_none());
+        // Reporter belongs to some other job.
+        assert!(resolve_hook_process_binding(Some(99), Some(42), Some(70), |_| Some(7)).is_none());
+    }
+
+    #[test]
+    fn hook_binding_liveness_rejects_recycled_group_leader() {
+        let binding = super::super::HookProcessBinding {
+            process_group_id: 99,
+            generation: 7,
+        };
+
+        assert!(hook_process_binding_is_live(&binding, Some(99), |_| Some(
+            7
+        )));
+        // Same pgid, different start token: the id was reused.
+        assert!(!hook_process_binding_is_live(&binding, Some(99), |_| Some(
+            8
+        )));
+        // Job is no longer in the foreground.
+        assert!(!hook_process_binding_is_live(&binding, Some(70), |_| Some(
+            7
+        )));
     }
 }

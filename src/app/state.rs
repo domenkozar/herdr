@@ -1471,6 +1471,13 @@ pub struct AppState {
     pub sidebar_agents: crate::config::AgentsSidebarConfig,
     pub sidebar_spaces: crate::config::SpacesSidebarConfig,
     pub next_agent_state_change_seq: u64,
+    /// Accepted hook identity bindings awaiting installation in the runtime
+    /// layer. This transient queue is never persisted.
+    pub(crate) pending_agent_identity_bindings: Vec<(
+        PaneId,
+        crate::detect::Agent,
+        crate::platform::HookProcessBinding,
+    )>,
     /// Capture mouse input for Herdr's own mouse UI. When false, Herdr only
     /// captures mouse while the focused pane app requests mouse reporting.
     pub mouse_capture: bool,
@@ -1845,6 +1852,7 @@ impl AppState {
             sidebar_agents: crate::config::AgentsSidebarConfig::default(),
             sidebar_spaces: crate::config::SpacesSidebarConfig::default(),
             next_agent_state_change_seq: 0,
+            pending_agent_identity_bindings: Vec::new(),
             mouse_capture: true,
             copy_on_select: true,
             right_click_passthrough_modifiers: None,

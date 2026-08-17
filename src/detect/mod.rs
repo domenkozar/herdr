@@ -216,7 +216,21 @@ fn lookup_agent(name: &str) -> Option<Agent> {
 /// Identify which agent is running from the process name.
 /// Returns `None` for plain shells or unrecognized programs.
 pub fn identify_agent(process_name: &str) -> Option<Agent> {
-    parse_agent_label(process_name)
+    let name = normalized_agent_lookup_name(process_name);
+    process_only_alias(&name)
+        .or_else(|| parse_canonical_agent_label(&name))
+        .or_else(|| lookup_agent(&name))
+}
+
+/// Aliases that only ever appear as executable names, never as configuration or
+/// API labels. Kept apart from `lookup_agent` so `parse_agent_label` stays
+/// canonical.
+fn process_only_alias(name: &str) -> Option<Agent> {
+    match name {
+        // The Nix-packaged Codex launcher executes a binary named `codex-raw`.
+        "codex-raw" => Some(Agent::Codex),
+        _ => None,
+    }
 }
 
 pub fn identify_agent_in_job(job: &crate::platform::ForegroundJob) -> Option<(Agent, String)> {
@@ -309,6 +323,12 @@ pub(crate) fn session_identity_only_integration(source: &str, agent_label: &str)
         (source, agent_label),
         ("herdr:hermes", "hermes") | ("herdr:qwen", "qwen") | ("herdr:antigravity_cli", "agy")
     )
+}
+
+/// Sources whose hook may bind agent identity to the reporter's foreground job.
+/// This grants identity only; screen detection keeps state authority.
+pub(crate) fn process_bound_identity_hook(source: &str, agent_label: &str) -> bool {
+    matches!((source, agent_label), ("herdr:codex", "codex"))
 }
 
 // ---------------------------------------------------------------------------
@@ -704,6 +724,7 @@ mod tests {
         assert_eq!(identify_agent("claude"), Some(Agent::Claude));
         assert_eq!(identify_agent("claude-code"), Some(Agent::Claude));
         assert_eq!(identify_agent("codex"), Some(Agent::Codex));
+        assert_eq!(identify_agent("codex-raw"), Some(Agent::Codex));
         assert_eq!(identify_agent("gemini"), Some(Agent::Gemini));
         assert_eq!(identify_agent("cursor"), Some(Agent::Cursor));
         assert_eq!(identify_agent("cursor-agent"), Some(Agent::Cursor));
@@ -761,6 +782,7 @@ mod tests {
         assert_eq!(parse_agent_label("qwen-code"), Some(Agent::Qwen));
         assert_eq!(parse_agent_label("maki"), Some(Agent::Maki));
         assert_eq!(parse_agent_label("kilo-code"), Some(Agent::Kilo));
+        assert_eq!(parse_agent_label("codex-raw"), None);
     }
 
     #[test]
@@ -962,6 +984,23 @@ mod tests {
         assert_eq!(
             identify_agent_in_job(&job),
             Some((Agent::Codex, "codex".to_string()))
+        );
+    }
+
+    #[test]
+    fn identify_agent_in_job_detects_nix_codex_raw_executable() {
+        let job = crate::platform::ForegroundJob {
+            process_group_id: 123,
+            processes: vec![foreground_process(
+                123,
+                "codex-raw",
+                &["/nix/store/example-codex/bin/codex-raw"],
+            )],
+        };
+
+        assert_eq!(
+            identify_agent_in_job(&job),
+            Some((Agent::Codex, "codex-raw".to_string()))
         );
     }
 

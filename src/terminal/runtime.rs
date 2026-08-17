@@ -238,6 +238,22 @@ impl TerminalRuntime {
         self.0.reset_agent_detection();
     }
 
+    pub(crate) fn resolve_agent_identity_binding(
+        &self,
+        reporter_pid: u32,
+        agent: crate::detect::Agent,
+    ) -> Option<crate::platform::HookProcessBinding> {
+        self.0.resolve_agent_identity_binding(reporter_pid, agent)
+    }
+
+    pub(crate) fn install_agent_identity_binding(
+        &self,
+        agent: crate::detect::Agent,
+        binding: crate::platform::HookProcessBinding,
+    ) -> bool {
+        self.0.install_agent_identity_binding(agent, binding)
+    }
+
     #[cfg(test)]
     pub(crate) fn agent_detection_reset_notify_for_test(
         &self,

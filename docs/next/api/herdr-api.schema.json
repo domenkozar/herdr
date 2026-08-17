@@ -2868,6 +2868,15 @@
             "pane_id": {
               "type": "string"
             },
+            "reporter_pid": {
+              "description": "PID of a short-lived native hook reporter. The server uses it only to\nbind an official identity-only report to the reporter's foreground job.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "seq": {
               "format": "uint64",
               "minimum": 0,

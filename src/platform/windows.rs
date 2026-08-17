@@ -1000,6 +1000,158 @@ pub fn foreground_process_group_id(child_pid: u32) -> Option<u32> {
     select_pane_foreground_job_cached(child_pid).map(|job| job.process_group_id)
 }
 
+pub(crate) fn resolve_hook_process_binding(
+    pane_shell_pid: u32,
+    reporter_pid: u32,
+) -> Option<super::HookProcessBinding> {
+    let snapshot = fresh_foreground_processes();
+    let root = hook_process_root_from_snapshot_with_runtime_inspection(
+        pane_shell_pid,
+        reporter_pid,
+        &snapshot,
+        |entry| process_runtime_marker(entry.pid),
+    )?;
+    Some(super::HookProcessBinding {
+        process_group_id: root.pid,
+        generation: root.command().creation_time?,
+    })
+}
+
+pub(crate) fn hook_process_binding_is_live(
+    pane_shell_pid: u32,
+    binding: &super::HookProcessBinding,
+) -> bool {
+    let snapshot = cached_foreground_processes();
+    validated_hook_binding_root_from_snapshot_with_runtime_inspection(
+        pane_shell_pid,
+        binding,
+        &snapshot,
+        |entry| process_runtime_marker(entry.pid),
+    )
+    .is_some()
+}
+
+pub(crate) fn validate_hook_process_binding(
+    pane_shell_pid: u32,
+    binding: &super::HookProcessBinding,
+) -> Option<ForegroundJob> {
+    let snapshot = cached_foreground_processes();
+    let root = validated_hook_binding_root_from_snapshot_with_runtime_inspection(
+        pane_shell_pid,
+        binding,
+        &snapshot,
+        |entry| process_runtime_marker(entry.pid),
+    )?;
+    Some(foreground_job_from_entry(root))
+}
+
+fn validated_hook_binding_root_from_snapshot_with_runtime_inspection<'a>(
+    pane_shell_pid: u32,
+    binding: &super::HookProcessBinding,
+    snapshot: &'a ProcessSnapshot,
+    runtime_marker: impl FnMut(&WindowsProcessEntry) -> Option<String>,
+) -> Option<&'a WindowsProcessEntry> {
+    let root = snapshot.entry(binding.process_group_id)?;
+    if root.command().creation_time != Some(binding.generation)
+        || !process_belongs_to_pane_with_runtime_inspection(
+            pane_shell_pid,
+            root.pid,
+            snapshot,
+            runtime_marker,
+        )
+    {
+        return None;
+    }
+    Some(root)
+}
+
+fn hook_process_root_from_snapshot_with_runtime_inspection<'a>(
+    pane_shell_pid: u32,
+    reporter_pid: u32,
+    snapshot: &'a ProcessSnapshot,
+    mut runtime_marker: impl FnMut(&WindowsProcessEntry) -> Option<String>,
+) -> Option<&'a WindowsProcessEntry> {
+    let shell = snapshot.entry(pane_shell_pid)?;
+    let reporter = snapshot.entry(reporter_pid)?;
+
+    if let Some(root) = topmost_descendant_below(pane_shell_pid, reporter_pid, snapshot) {
+        return snapshot.entry(root);
+    }
+
+    let shell_marker = runtime_marker(shell).filter(|marker| !marker.is_empty())?;
+    if runtime_marker(reporter).as_deref() != Some(shell_marker.as_str()) {
+        return None;
+    }
+
+    let mut current = reporter;
+    let mut visited = HashSet::new();
+    visited.insert(current.pid);
+    loop {
+        let Some(parent) = snapshot.entry(current.parent_pid) else {
+            return Some(current);
+        };
+        if !visited.insert(parent.pid)
+            || runtime_marker(parent).as_deref() != Some(shell_marker.as_str())
+        {
+            return Some(current);
+        }
+        if parent.pid == pane_shell_pid {
+            return Some(current);
+        }
+        current = parent;
+    }
+}
+
+fn process_belongs_to_pane_with_runtime_inspection(
+    pane_shell_pid: u32,
+    process_pid: u32,
+    snapshot: &ProcessSnapshot,
+    runtime_marker: impl FnMut(&WindowsProcessEntry) -> Option<String>,
+) -> bool {
+    process_is_ancestor(pane_shell_pid, process_pid, snapshot)
+        || shares_pane_runtime_marker(pane_shell_pid, process_pid, snapshot, runtime_marker)
+}
+
+/// Whether two processes report the same non-empty runtime marker, which is how
+/// pane ownership is established when the parent chain has been broken.
+fn shares_pane_runtime_marker(
+    pane_shell_pid: u32,
+    process_pid: u32,
+    snapshot: &ProcessSnapshot,
+    mut runtime_marker: impl FnMut(&WindowsProcessEntry) -> Option<String>,
+) -> bool {
+    let Some(shell) = snapshot.entry(pane_shell_pid) else {
+        return false;
+    };
+    let Some(process) = snapshot.entry(process_pid) else {
+        return false;
+    };
+    let Some(shell_marker) = runtime_marker(shell).filter(|marker| !marker.is_empty()) else {
+        return false;
+    };
+    runtime_marker(process).as_deref() == Some(shell_marker.as_str())
+}
+
+fn topmost_descendant_below(
+    ancestor_pid: u32,
+    descendant_pid: u32,
+    snapshot: &ProcessSnapshot,
+) -> Option<u32> {
+    let mut current = descendant_pid;
+    let mut visited = HashSet::new();
+    while visited.insert(current) {
+        let entry = snapshot.entry(current)?;
+        if entry.parent_pid == ancestor_pid {
+            return Some(current);
+        }
+        if entry.parent_pid == 0 {
+            return None;
+        }
+        current = entry.parent_pid;
+    }
+    None
+}
+
 pub fn process_cwd(pid: u32) -> Option<PathBuf> {
     let process = ProcessHandle::open(pid, PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ)?;
     let process_parameters = read_process_parameters(process.0)?;
@@ -1135,22 +1287,7 @@ fn select_topmost_agent_chain_candidate<'a>(
 }
 
 fn process_is_ancestor(ancestor_pid: u32, descendant_pid: u32, snapshot: &ProcessSnapshot) -> bool {
-    let mut current = descendant_pid;
-    let mut visited = HashSet::new();
-    while visited.insert(current) {
-        let Some(parent) = snapshot.entry(current).map(|entry| entry.parent_pid) else {
-            return false;
-        };
-        if parent == ancestor_pid {
-            return true;
-        }
-        if parent == 0 {
-            return false;
-        }
-        current = parent;
-    }
-
-    false
+    topmost_descendant_below(ancestor_pid, descendant_pid, snapshot).is_some()
 }
 
 fn descendant_entries(root_pid: u32, snapshot: &ProcessSnapshot) -> Vec<&WindowsProcessEntry> {
@@ -3628,6 +3765,82 @@ mod tests {
 
         assert_eq!(job.process_group_id, 10);
         assert_eq!(job.processes[0].name, "powershell.exe");
+    }
+
+    #[test]
+    fn hook_reporter_ancestry_resolves_unknown_agent_root_below_shell() {
+        let snapshot = super::ProcessSnapshot::new(vec![
+            test_entry_with_creation_time(10, 1, "powershell.exe", &["powershell.exe"], Some(1)),
+            test_entry_with_creation_time(20, 10, "codex-raw.exe", &["codex-raw.exe"], Some(2)),
+            test_entry_with_creation_time(30, 20, "cmd.exe", &["cmd.exe"], Some(3)),
+            test_entry_with_creation_time(40, 30, "herdr.exe", &["herdr.exe"], Some(4)),
+        ]);
+
+        let root = super::hook_process_root_from_snapshot_with_runtime_inspection(
+            10,
+            40,
+            &snapshot,
+            |_| None,
+        )
+        .unwrap();
+
+        assert_eq!(root.pid, 20);
+    }
+
+    #[test]
+    fn hook_reporter_outside_pane_tree_requires_matching_runtime_marker() {
+        let snapshot = super::ProcessSnapshot::new(vec![
+            test_entry_with_creation_time(10, 1, "bash.exe", &["bash.exe"], Some(1)),
+            test_entry_with_creation_time(20, 1, "codex-raw.exe", &["codex-raw.exe"], Some(2)),
+            test_entry_with_creation_time(40, 20, "herdr.exe", &["herdr.exe"], Some(4)),
+        ]);
+        let marker = |entry: &super::WindowsProcessEntry| match entry.pid {
+            10 => Some("pane-a".to_string()),
+            20 | 40 => Some("pane-b".to_string()),
+            _ => None,
+        };
+
+        assert!(
+            super::hook_process_root_from_snapshot_with_runtime_inspection(
+                10, 40, &snapshot, marker,
+            )
+            .is_none()
+        );
+
+        let matching_marker = |entry: &super::WindowsProcessEntry| match entry.pid {
+            10 | 20 | 40 => Some("pane-a".to_string()),
+            _ => None,
+        };
+        let root = super::hook_process_root_from_snapshot_with_runtime_inspection(
+            10,
+            40,
+            &snapshot,
+            matching_marker,
+        )
+        .unwrap();
+        assert_eq!(root.pid, 20);
+    }
+
+    #[test]
+    fn hook_binding_rejects_reused_windows_process_id() {
+        let snapshot = super::ProcessSnapshot::new(vec![
+            test_entry_with_creation_time(10, 1, "powershell.exe", &["powershell.exe"], Some(1)),
+            test_entry_with_creation_time(20, 10, "codex-raw.exe", &["codex-raw.exe"], Some(8)),
+        ]);
+        let stale = crate::platform::HookProcessBinding {
+            process_group_id: 20,
+            generation: 7,
+        };
+
+        assert!(
+            super::validated_hook_binding_root_from_snapshot_with_runtime_inspection(
+                10,
+                &stale,
+                &snapshot,
+                |_| None,
+            )
+            .is_none()
+        );
     }
 
     #[test]

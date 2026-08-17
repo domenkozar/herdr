@@ -1385,10 +1385,29 @@ impl TerminalState {
         seq: Option<u64>,
         session_start_source: Option<String>,
     ) -> Option<TerminalStateMutation> {
+        self.set_agent_session_ref_for_session_start_with_verified_agent(
+            source,
+            agent_label,
+            session_ref,
+            seq,
+            session_start_source,
+            None,
+        )
+    }
+
+    pub(crate) fn set_agent_session_ref_for_session_start_with_verified_agent(
+        &mut self,
+        source: String,
+        agent_label: String,
+        session_ref: Option<crate::agent_resume::AgentSessionRef>,
+        seq: Option<u64>,
+        session_start_source: Option<String>,
+        verified_foreground_agent: Option<crate::detect::Agent>,
+    ) -> Option<TerminalStateMutation> {
         let session_ref = session_ref?;
         let known_agent = crate::detect::parse_agent_label(&agent_label);
         let process_present = known_agent.is_some()
-            && self.detected_agent == known_agent
+            && (self.detected_agent == known_agent || verified_foreground_agent == known_agent)
             && self.recent_agent_process_exit.is_none();
         let full_lifecycle_source =
             crate::detect::full_lifecycle_hook_authority(&source, &agent_label);
@@ -1540,6 +1559,7 @@ impl TerminalState {
                 &agent_label,
                 &session_ref,
                 session_start_source.as_deref(),
+                verified_foreground_agent,
             );
         if owner_conflicts && !foreground_takeover_allowed {
             return None;
@@ -1620,9 +1640,16 @@ impl TerminalState {
         agent_label: &str,
         session_ref: &crate::agent_resume::AgentSessionRef,
         session_start_source: Option<&str>,
+        verified_foreground_agent: Option<crate::detect::Agent>,
     ) -> bool {
         Self::session_start_source_is_recognized(session_start_source)
-            && self.foreground_agent_confirms_session_owner(source, agent_label, session_ref)
+            && (self.foreground_agent_confirms_session_owner(source, agent_label, session_ref)
+                || Self::agent_confirms_session_owner(
+                    verified_foreground_agent,
+                    source,
+                    agent_label,
+                    session_ref,
+                ))
     }
 
     fn foreground_agent_confirms_hook_authority_takeover(
@@ -1642,10 +1669,21 @@ impl TerminalState {
         agent_label: &str,
         session_ref: &crate::agent_resume::AgentSessionRef,
     ) -> bool {
-        let Some(detected_agent) = self.detected_agent else {
+        Self::agent_confirms_session_owner(self.detected_agent, source, agent_label, session_ref)
+    }
+
+    /// The reported label names `candidate`, and source plus label resolve to a
+    /// resume plan. `candidate` of `None` never confirms an owner.
+    fn agent_confirms_session_owner(
+        candidate: Option<crate::detect::Agent>,
+        source: &str,
+        agent_label: &str,
+        session_ref: &crate::agent_resume::AgentSessionRef,
+    ) -> bool {
+        let Some(candidate) = candidate else {
             return false;
         };
-        crate::detect::parse_agent_label(agent_label) == Some(detected_agent)
+        crate::detect::parse_agent_label(agent_label) == Some(candidate)
             && crate::agent_resume::plan(source, agent_label, session_ref).is_some()
     }
 
@@ -2400,6 +2438,66 @@ mod tests {
 
             assert_eq!(terminal.state, AgentState::Working);
         }
+    }
+
+    #[test]
+    fn verified_codex_identity_accepts_session_without_becoming_state_authority() {
+        let mut terminal = test_terminal();
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:codex".to_string(),
+            agent: "codex".to_string(),
+            session_ref: crate::agent_resume::AgentSessionRef::id("old-session").unwrap(),
+        });
+
+        let mutation = terminal.set_agent_session_ref_for_session_start_with_verified_agent(
+            "herdr:codex".to_string(),
+            "codex".to_string(),
+            crate::agent_resume::AgentSessionRef::id("new-session"),
+            Some(10),
+            Some("startup".to_string()),
+            Some(Agent::Codex),
+        );
+
+        assert!(mutation.is_some());
+        assert!(terminal.hook_authority.is_none());
+        assert_eq!(terminal.detected_agent, None);
+        assert_eq!(terminal.effective_agent_label(), None);
+        assert_eq!(
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .map(|session| session.session_ref.value.as_str()),
+            Some("new-session")
+        );
+
+        let stale = terminal.set_agent_session_ref_for_session_start_with_verified_agent(
+            "herdr:codex".to_string(),
+            "codex".to_string(),
+            crate::agent_resume::AgentSessionRef::id("stale-session"),
+            Some(10),
+            Some("startup".to_string()),
+            Some(Agent::Codex),
+        );
+        assert!(stale.is_none());
+        assert_eq!(
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .map(|session| session.session_ref.value.as_str()),
+            Some("new-session")
+        );
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            Instant::now(),
+        );
+        assert_eq!(terminal.effective_agent_label(), Some("codex"));
+        assert_eq!(terminal.state, AgentState::Working);
     }
 
     #[test]

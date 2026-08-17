@@ -149,7 +149,7 @@ Codex フックをインストールします:
 herdr integration install codex
 ```
 
-Codex フックは、他のインテグレーションと同じローカルソケット API を通じてセッション識別を報告します。Codex の状態は Herdr のスクリーンマニフェスト検出から得られます。
+Codex フックは Herdr バイナリを直接使用するため、Python は必要ありません。セッション開始時に再開可能なセッションを報告し、Codex の識別情報をそのライブなフォアグラウンドジョブに結び付けるため、下流パッケージが実行ファイル名を変更してもエージェント検出は壊れません。`working`、`blocked`、`idle` の状態は引き続き Herdr のスクリーンマニフェスト検出から得られ、フックはライフサイクル状態を報告しません。
 
 Herdr はデフォルトで `~/.codex` を使い、`CODEX_HOME` が設定されていればそちらを使います。Codex の設定ディレクトリはあらかじめ存在している必要があります。インストールは `herdr-agent-state.sh` を書き込み、`hooks.json` を更新し、`config.toml` に `[features] hooks = true` があることを保証します。非推奨のトップレベル `codex_hooks` フラグが存在すれば削除もします。アンインストールは `hooks.json` から Herdr のエントリを削除してフックスクリプトを削除しますが、`config.toml` は変更しません。
 

@@ -1262,26 +1262,53 @@ impl App {
         id: String,
         params: PaneReportAgentSessionParams,
     ) -> String {
-        let Some((_ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+        let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
             return pane_not_found(id, &params.pane_id);
         };
         let Some(agent_label) = normalize_reported_agent_label(&params.agent) else {
             return invalid_agent(id);
         };
+        let session_ref = crate::agent_resume::session_ref_from_report(
+            &params.source,
+            &agent_label,
+            params.agent_session_id,
+            params.agent_session_path,
+        );
+        let identity_binding_eligible =
+            crate::detect::process_bound_identity_hook(&params.source, &agent_label)
+                && params.reporter_pid.is_some()
+                && session_ref.is_some();
+        let identity_binding = identity_binding_eligible
+            .then(|| {
+                params
+                    .reporter_pid
+                    .zip(crate::detect::parse_agent_label(&agent_label))
+            })
+            .flatten()
+            .and_then(|(reporter_pid, agent)| {
+                self.lookup_runtime(ws_idx, pane_id)
+                    .and_then(|(runtime, _)| {
+                        runtime.resolve_agent_identity_binding(reporter_pid, agent)
+                    })
+                    .map(|binding| (agent, binding))
+            });
+        if identity_binding_eligible && identity_binding.is_none() {
+            tracing::debug!(
+                pane = pane_id.raw(),
+                reporter_pid = params.reporter_pid,
+                "agent hook session could not be bound to the foreground job"
+            );
+        }
         self.handle_internal_event(crate::events::AppEvent::AgentSessionReported {
             pane_id,
-            session_ref: crate::agent_resume::session_ref_from_report(
-                &params.source,
-                &agent_label,
-                params.agent_session_id,
-                params.agent_session_path,
-            ),
+            session_ref,
             source: params.source,
             agent_label,
             seq: params.seq,
             session_start_source: crate::agent_resume::normalize_session_start_source(
                 params.session_start_source,
             ),
+            identity_binding,
         });
 
         encode_success(id, ResponseResult::Ok {})

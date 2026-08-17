@@ -390,6 +390,41 @@ pub fn foreground_process_group_id_for_tty_fd(fd: RawFd) -> Option<u32> {
     (pgid > 0).then_some(pgid as u32)
 }
 
+pub(crate) fn resolve_hook_process_binding(
+    pane_shell_pid: u32,
+    reporter_pid: u32,
+) -> Option<super::HookProcessBinding> {
+    super::unix_common::resolve_hook_process_binding(
+        foreground_process_group_id(pane_shell_pid),
+        process_pgid(pane_shell_pid),
+        process_pgid(reporter_pid),
+        process_start_token,
+    )
+}
+
+pub(crate) fn hook_process_binding_is_live(
+    pane_shell_pid: u32,
+    binding: &super::HookProcessBinding,
+) -> bool {
+    super::unix_common::hook_process_binding_is_live(
+        binding,
+        foreground_process_group_id(pane_shell_pid),
+        process_start_token,
+    )
+}
+
+pub(crate) fn validate_hook_process_binding(
+    pane_shell_pid: u32,
+    binding: &super::HookProcessBinding,
+) -> Option<ForegroundJob> {
+    super::unix_common::validate_hook_process_binding(
+        binding,
+        foreground_process_group_id(pane_shell_pid),
+        process_start_token,
+        || foreground_job(pane_shell_pid),
+    )
+}
+
 /// Get the effective process name from `argv[0]` via `sysctl(KERN_PROCARGS2)`.
 ///
 /// This is the macOS equivalent of reading `/proc/{pid}/cmdline` on Linux.
@@ -773,6 +808,20 @@ fn process_bsdinfo(pid: u32) -> Option<libc::proc_bsdinfo> {
     };
 
     (ret == size).then_some(info)
+}
+
+fn process_pgid(pid: u32) -> Option<u32> {
+    let pgid = process_bsdinfo(pid)?.pbi_pgid;
+    (pgid > 0).then_some(pgid)
+}
+
+fn process_start_token(pid: u32) -> Option<u64> {
+    let info = process_bsdinfo(pid)?;
+    Some(
+        info.pbi_start_tvsec
+            .wrapping_mul(1_000_000)
+            .wrapping_add(info.pbi_start_tvusec),
+    )
 }
 
 fn comm_from_bsdinfo(info: &libc::proc_bsdinfo) -> Option<String> {

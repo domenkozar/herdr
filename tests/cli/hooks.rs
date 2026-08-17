@@ -83,6 +83,7 @@ fn run_shell_hook_with_env(
         .env("HERDR_ENV", "1")
         .env("HERDR_SOCKET_PATH", &socket_path)
         .env("HERDR_PANE_ID", "p_test")
+        .env("HERDR_BIN_PATH", env!("CARGO_BIN_EXE_herdr"))
         .env_remove("CODEX_THREAD_ID")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -154,12 +155,14 @@ fn claude_hook_reports_session_id_from_stdin() {
 fn codex_hook_reports_persisted_root_session_and_ignores_ephemeral_or_nested_sessions() {
     let request = run_codex_hook(
         "session",
-        r#"{"hook_event_name":"SessionStart","session_id":"codex-session","transcript_path":"/tmp/codex-session.jsonl"}"#,
+        r#"{"hook_event_name":"SessionStart","session_id":"codex-session","transcript_path":"/tmp/codex-session.jsonl","source":"startup"}"#,
     )
     .expect("codex hook should report session identity");
 
     assert_eq!(request["method"], "pane.report_agent_session");
     assert_eq!(request["params"]["agent_session_id"], "codex-session");
+    assert_eq!(request["params"]["session_start_source"], "startup");
+    assert!(request["params"]["reporter_pid"].as_u64().is_some());
     assert!(request["params"].get("state").is_none());
 
     let matching_request = run_shell_hook_with_env(
@@ -187,6 +190,44 @@ fn codex_hook_reports_persisted_root_session_and_ignores_ephemeral_or_nested_ses
         &[("CODEX_THREAD_ID", "parent-session")],
     )
     .is_none());
+}
+
+#[test]
+fn codex_hook_is_dependency_free_and_rejects_malformed_or_inexact_events() {
+    let shell = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|dir| dir.join("bash"))
+        .find(|candidate| candidate.is_file())
+        .expect("bash on test PATH");
+    let path_base = unique_test_dir();
+    fs::create_dir_all(&path_base).unwrap();
+    std::os::unix::fs::symlink(&shell, path_base.join("bash")).unwrap();
+    let dependency_free_path = path_base.to_string_lossy().to_string();
+
+    let request = run_shell_hook_with_env(
+        "src/integration/assets/codex/herdr-agent-state.sh",
+        &["session"],
+        r#"{"hook_event_name":"SessionStart","session_id":"codex-session","transcript_path":"/tmp/codex-session.jsonl"}"#,
+        &[("PATH", dependency_free_path.as_str())],
+    )
+    .expect("hook should run with only bash on PATH");
+    assert_eq!(request["params"]["agent_session_id"], "codex-session");
+
+    assert!(run_codex_hook("session", "not json").is_none());
+    assert!(run_codex_hook(
+        "session",
+        r#"{"session_id":"codex-session","transcript_path":"/tmp/codex-session.jsonl"}"#,
+    )
+    .is_none());
+    assert!(run_codex_hook(
+        "session",
+        &format!(
+            "{{\"hook_event_name\":\"SessionStart\",\"session_id\":\"codex-session\",\"transcript_path\":\"/tmp/session\",\"padding\":\"{}\"}}",
+            "x".repeat(70 * 1024)
+        ),
+    )
+    .is_none());
+
+    cleanup_test_base(&path_base);
 }
 
 #[test]

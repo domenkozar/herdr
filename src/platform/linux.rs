@@ -334,13 +334,8 @@ pub fn foreground_group_leader_job(process_group_id: u32) -> Option<ForegroundJo
 }
 
 pub fn foreground_process_group_id(child_pid: u32) -> Option<u32> {
-    // /proc/<pid>/stat format: "pid (comm) state ppid pgrp session tty_nr tpgid ..."
-    // The (comm) field can contain spaces and parens, so we find the last ')' first.
     let stat = std::fs::read_to_string(format!("/proc/{child_pid}/stat")).ok()?;
-    let rest = stat.get(stat.rfind(')')? + 2..)?;
-    let fields: Vec<&str> = rest.split_whitespace().collect();
-    // After (comm): state(0) ppid(1) pgrp(2) session(3) tty_nr(4) tpgid(5)
-    let tpgid: i32 = fields.get(5)?.parse().ok()?;
+    let tpgid: i32 = proc_stat_field(&stat, PROC_STAT_TPGID)?.parse().ok()?;
     (tpgid > 0).then_some(tpgid as u32)
 }
 
@@ -349,18 +344,79 @@ pub fn foreground_process_group_id_for_tty_fd(fd: RawFd) -> Option<u32> {
     (pgid > 0).then_some(pgid as u32)
 }
 
+pub(crate) fn resolve_hook_process_binding(
+    pane_shell_pid: u32,
+    reporter_pid: u32,
+) -> Option<super::HookProcessBinding> {
+    super::unix_common::resolve_hook_process_binding(
+        foreground_process_group_id(pane_shell_pid),
+        process_pgid(pane_shell_pid),
+        process_pgid(reporter_pid),
+        process_start_token,
+    )
+}
+
+pub(crate) fn hook_process_binding_is_live(
+    pane_shell_pid: u32,
+    binding: &super::HookProcessBinding,
+) -> bool {
+    super::unix_common::hook_process_binding_is_live(
+        binding,
+        foreground_process_group_id(pane_shell_pid),
+        process_start_token,
+    )
+}
+
+pub(crate) fn validate_hook_process_binding(
+    pane_shell_pid: u32,
+    binding: &super::HookProcessBinding,
+) -> Option<ForegroundJob> {
+    super::unix_common::validate_hook_process_binding(
+        binding,
+        foreground_process_group_id(pane_shell_pid),
+        process_start_token,
+        || foreground_job(pane_shell_pid),
+    )
+}
+
+// `/proc/<pid>/stat` is "pid (comm) state ppid pgrp session tty_nr tpgid ...".
+// The (comm) field can contain spaces and parens, so fields are indexed after
+// the last ')', where `state` is index 0.
+const PROC_STAT_PGRP: usize = 2;
+const PROC_STAT_TPGID: usize = 5;
+/// Linux `starttime`, field 22 of the stat line.
+const PROC_STAT_STARTTIME: usize = 19;
+
+fn proc_stat_field(stat: &str, index: usize) -> Option<&str> {
+    stat.get(stat.rfind(')')? + 2..)?
+        .split_whitespace()
+        .nth(index)
+}
+
 fn process_pgrp_and_comm(pid: u32) -> Option<(i32, String)> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     process_pgrp_and_comm_from_stat(&stat)
 }
 
 fn process_pgrp_and_comm_from_stat(stat: &str) -> Option<(i32, String)> {
-    let close = stat.rfind(')')?;
-    let comm = stat.get(1 + stat.find('(')?..close)?.to_string();
-    let rest = stat.get(close + 2..)?;
-    let fields: Vec<&str> = rest.split_whitespace().collect();
-    let pgrp: i32 = fields.get(2)?.parse().ok()?;
+    let comm = stat.get(1 + stat.find('(')?..stat.rfind(')')?)?.to_string();
+    let pgrp: i32 = proc_stat_field(stat, PROC_STAT_PGRP)?.parse().ok()?;
     Some((pgrp, comm))
+}
+
+fn process_pgid(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let pgrp: i32 = proc_stat_field(&stat, PROC_STAT_PGRP)?.parse().ok()?;
+    (pgrp > 0).then_some(pgrp as u32)
+}
+
+fn process_start_token(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    process_start_token_from_stat(&stat)
+}
+
+fn process_start_token_from_stat(stat: &str) -> Option<u64> {
+    proc_stat_field(stat, PROC_STAT_STARTTIME)?.parse().ok()
 }
 
 fn process_argv(pid: u32) -> Option<Vec<String>> {
@@ -998,6 +1054,16 @@ mod tests {
             process_pgrp_and_comm_from_stat("123 (name with ) paren) S 1 456 789 0 456"),
             Some((456, "name with ) paren".to_string()))
         );
+    }
+
+    #[test]
+    fn proc_stat_start_token_uses_linux_starttime_field() {
+        let mut fields = vec!["0"; 20];
+        fields[0] = "S";
+        fields[19] = "4242";
+        let stat = format!("123 (renamed agent) {}", fields.join(" "));
+
+        assert_eq!(process_start_token_from_stat(&stat), Some(4242));
     }
 
     #[test]

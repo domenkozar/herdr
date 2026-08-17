@@ -1,4 +1,19 @@
-use crate::api::schema::IntegrationTarget;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use serde::Deserialize;
+
+use crate::api::schema::{IntegrationTarget, Method, PaneReportAgentSessionParams, Request};
+
+const CODEX_HOOK_INPUT_LIMIT: usize = 64 * 1024;
+const CODEX_HOOK_REQUEST_TIMEOUT: Duration = Duration::from_millis(400);
+
+#[derive(Deserialize)]
+struct CodexHookInput {
+    hook_event_name: Option<String>,
+    session_id: Option<String>,
+    transcript_path: Option<String>,
+    source: Option<String>,
+}
 
 pub(super) fn run_integration_command(args: &[String]) -> std::io::Result<i32> {
     let Some(subcommand) = args.first().map(|arg| arg.as_str()) else {
@@ -10,6 +25,8 @@ pub(super) fn run_integration_command(args: &[String]) -> std::io::Result<i32> {
         "install" => integration_install(&args[1..]),
         "uninstall" => integration_uninstall(&args[1..]),
         "status" => integration_status(&args[1..]),
+        // Integration assets call this intentionally hidden, best-effort path.
+        "hook" => integration_hook(&args[1..]),
         "help" | "--help" | "-h" => {
             print_integration_help();
             Ok(0)
@@ -19,6 +36,76 @@ pub(super) fn run_integration_command(args: &[String]) -> std::io::Result<i32> {
             Ok(2)
         }
     }
+}
+
+fn integration_hook(args: &[String]) -> std::io::Result<i32> {
+    if args != ["codex", "session"] {
+        return Ok(0);
+    }
+    let _ = report_codex_session_start();
+    Ok(0)
+}
+
+fn report_codex_session_start() -> Option<()> {
+    if std::env::var(crate::HERDR_ENV_VAR).ok().as_deref() != Some(crate::HERDR_ENV_VALUE) {
+        return None;
+    }
+    let pane_id = nonempty_env(crate::integration::HERDR_PANE_ID_ENV_VAR)?;
+    // Presence guard: the client resolves the socket path itself.
+    nonempty_env(crate::api::SOCKET_PATH_ENV_VAR)?;
+
+    let input =
+        match crate::platform::read_limited_reader(std::io::stdin().lock(), CODEX_HOOK_INPUT_LIMIT)
+            .ok()?
+        {
+            crate::platform::LimitedRead::Complete(bytes) => bytes,
+            crate::platform::LimitedRead::Empty | crate::platform::LimitedRead::Oversized => {
+                return None;
+            }
+        };
+    let input: CodexHookInput = serde_json::from_slice(&input).ok()?;
+    if input.hook_event_name.as_deref() != Some("SessionStart") {
+        return None;
+    }
+    let session_id = input.session_id.filter(|value| !value.trim().is_empty())?;
+    input
+        .transcript_path
+        .filter(|value| !value.trim().is_empty())?;
+    if std::env::var("CODEX_THREAD_ID")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .is_some_and(|inherited| inherited != session_id)
+    {
+        return None;
+    }
+
+    let seq = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_nanos()
+        .min(u128::from(u64::MAX)) as u64;
+    let request = Request {
+        id: format!("herdr:codex-hook:{}:{seq}", std::process::id()),
+        method: Method::PaneReportAgentSession(PaneReportAgentSessionParams {
+            pane_id,
+            source: "herdr:codex".to_string(),
+            agent: "codex".to_string(),
+            seq: Some(seq),
+            agent_session_id: Some(session_id),
+            agent_session_path: None,
+            session_start_source: input.source,
+            reporter_pid: Some(std::process::id()),
+        }),
+    };
+    let _ = crate::api::client::ApiClient::local()
+        .request_value_with_timeout(&request, CODEX_HOOK_REQUEST_TIMEOUT);
+    Some(())
+}
+
+fn nonempty_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
 }
 
 fn integration_status(args: &[String]) -> std::io::Result<i32> {

@@ -548,6 +548,53 @@ struct ProcessProbeResult {
     process_name: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BoundAgentIdentityHint {
+    agent: Agent,
+    process: crate::platform::HookProcessBinding,
+}
+
+fn bound_agent_identity(hint: &Mutex<Option<BoundAgentIdentityHint>>) -> Option<Agent> {
+    hint.lock()
+        .ok()
+        .and_then(|hint| hint.as_ref().map(|hint| hint.agent))
+}
+
+/// Process group pinned by an installed identity binding. While one is present
+/// the detection loop trusts it instead of re-reading the foreground group.
+fn bound_hint_process_group(hint: &Mutex<Option<BoundAgentIdentityHint>>) -> Option<u32> {
+    hint.lock()
+        .ok()
+        .and_then(|hint| hint.as_ref().map(|hint| hint.process.process_group_id))
+}
+
+/// A binding restored across handoff seeds the agent before any probe has run.
+/// The first probe that re-identifies that same agent confirms it, and must be
+/// reported even though nothing changed.
+fn confirms_bound_identity(
+    hint: &Mutex<Option<BoundAgentIdentityHint>>,
+    had_process_probe: bool,
+    previous_agent: Option<Agent>,
+    new_agent: Option<Agent>,
+) -> bool {
+    !had_process_probe
+        && previous_agent.is_some()
+        && previous_agent == new_agent
+        && bound_hint_process_group(hint).is_some()
+}
+
+/// Clear the hint, but only if it is still the one the caller acted on.
+fn clear_bound_agent_identity(
+    hint: &Mutex<Option<BoundAgentIdentityHint>>,
+    expected: &BoundAgentIdentityHint,
+) {
+    if let Ok(mut hint) = hint.lock() {
+        if hint.as_ref() == Some(expected) {
+            *hint = None;
+        }
+    }
+}
+
 fn agent_hint_for_foreground_job_members(
     job: &crate::platform::ForegroundJob,
     read_hint: impl Fn(u32) -> Option<Agent>,
@@ -673,6 +720,79 @@ fn probe_foreground_process(pid: u32, foreground_pgid: Option<u32>) -> ProcessPr
     )
 }
 
+fn probe_foreground_process_with_bound_hint(
+    pid: u32,
+    foreground_pgid: Option<u32>,
+    bound_hint: &Mutex<Option<BoundAgentIdentityHint>>,
+) -> ProcessProbeResult {
+    let probe = probe_foreground_process(pid, foreground_pgid);
+    // Copy the hint out so process inspection never runs under the lock.
+    let Some(active_hint) = bound_hint.lock().ok().and_then(|hint| hint.clone()) else {
+        return probe;
+    };
+    let (probe, disposition) = apply_bound_hint_to_probe(
+        pid,
+        probe,
+        &active_hint,
+        || crate::platform::hook_process_binding_is_live(pid, &active_hint.process),
+        || crate::platform::validate_hook_process_binding(pid, &active_hint.process),
+    );
+    if disposition == BoundHintDisposition::Keep {
+        return probe;
+    }
+    clear_bound_agent_identity(bound_hint, &active_hint);
+    if disposition == BoundHintDisposition::ClearConflict {
+        return probe;
+    }
+    // The pinned group is gone, so the probe above looked at the wrong job.
+    let actual_foreground_pgid = crate::detect::foreground_process_group_id(pid);
+    let mut actual_probe = probe_foreground_process(pid, actual_foreground_pgid);
+    // No agent left in the real foreground job means the bound agent exited.
+    actual_probe.foreground_is_pane_shell |= actual_probe.agent.is_none();
+    actual_probe
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BoundHintDisposition {
+    Keep,
+    ClearConflict,
+    Invalidated,
+}
+
+fn apply_bound_hint_to_probe(
+    pane_shell_pid: u32,
+    probe: ProcessProbeResult,
+    hint: &BoundAgentIdentityHint,
+    is_live: impl FnOnce() -> bool,
+    materialize: impl FnOnce() -> Option<crate::platform::ForegroundJob>,
+) -> (ProcessProbeResult, BoundHintDisposition) {
+    // The probe named an agent on its own, so the binding only has to still be
+    // live. Materializing the job here would walk the process tree for nothing.
+    if let Some(agent) = probe.agent {
+        if !is_live() {
+            return (probe, BoundHintDisposition::Invalidated);
+        }
+        let disposition = if agent == hint.agent {
+            BoundHintDisposition::Keep
+        } else {
+            BoundHintDisposition::ClearConflict
+        };
+        return (probe, disposition);
+    }
+    let Some(job) = materialize() else {
+        return (probe, BoundHintDisposition::Invalidated);
+    };
+    (
+        process_probe_result(
+            &job,
+            pane_shell_pid,
+            hint.agent,
+            crate::detect::agent_label(hint.agent).to_string(),
+        ),
+        BoundHintDisposition::Keep,
+    )
+}
+
 #[cfg(unix)]
 fn spawn_basic_detection_task(
     pane_id: PaneId,
@@ -680,6 +800,7 @@ fn spawn_basic_detection_task(
     terminal: Arc<PaneTerminal>,
     detection_content_seq: Arc<AtomicU64>,
     full_lifecycle_authority_active: Arc<AtomicBool>,
+    bound_agent_identity_hint: Arc<Mutex<Option<BoundAgentIdentityHint>>>,
     state_events: mpsc::Sender<AppEvent>,
 ) -> (
     tokio::task::AbortHandle,
@@ -692,7 +813,8 @@ fn spawn_basic_detection_task(
     let pending_release_for_task = pending_release.clone();
 
     let handle = tokio::spawn(async move {
-        let mut agent_presence = AgentDetectionPresence::from_agent(None);
+        let mut agent_presence =
+            AgentDetectionPresence::from_agent(bound_agent_identity(&bound_agent_identity_hint));
         let mut state = AgentState::Unknown;
         let mut last_visible_idle = false;
         let mut last_visible_blocker = false;
@@ -720,7 +842,9 @@ fn spawn_basic_detection_task(
             tokio::select! {
                 _ = tokio::time::sleep(sleep_duration) => {}
                 _ = detect_reset.notified() => {
-                    agent_presence = AgentDetectionPresence::from_agent(None);
+                    agent_presence = AgentDetectionPresence::from_agent(bound_agent_identity(
+                        &bound_agent_identity_hint,
+                    ));
                     state = AgentState::Unknown;
                     last_visible_idle = false;
                     last_visible_blocker = false;
@@ -754,9 +878,12 @@ fn spawn_basic_detection_task(
             let mut agent = agent_presence.current_agent();
             let lifecycle_authority_active =
                 full_lifecycle_authority_active.load(Ordering::Acquire);
-            let foreground_pgid = (pid > 0)
-                .then(|| crate::detect::foreground_process_group_id(pid))
-                .flatten();
+            let foreground_pgid =
+                bound_hint_process_group(&bound_agent_identity_hint).or_else(|| {
+                    (pid > 0)
+                        .then(|| crate::detect::foreground_process_group_id(pid))
+                        .flatten()
+                });
             let process_group_changed =
                 foreground_group_changed(foreground_pgid, last_foreground_pgid);
             let should_check_process = pid > 0 && {
@@ -782,7 +909,11 @@ fn spawn_basic_detection_task(
                 last_process_check = now;
                 let had_process_probe = has_process_probe;
                 has_process_probe = true;
-                let probe = probe_foreground_process(pid, foreground_pgid);
+                let probe = probe_foreground_process_with_bound_hint(
+                    pid,
+                    foreground_pgid,
+                    &bound_agent_identity_hint,
+                );
                 let process_group_id = probe.process_group_id;
                 let tracked_process_group_id =
                     process_group_for_change_tracking(foreground_pgid, process_group_id);
@@ -810,6 +941,12 @@ fn spawn_basic_detection_task(
                     &mut pending_foreground_shell_clear,
                     &mut foreground_shell_exit_reported,
                 );
+                let bound_identity_confirmed = confirms_bound_identity(
+                    &bound_agent_identity_hint,
+                    had_process_probe,
+                    previous_agent,
+                    new_agent,
+                );
                 last_foreground_pgid = tracked_process_group_id;
                 if new_agent.is_some() {
                     acquisition_started_at = None;
@@ -820,11 +957,12 @@ fn spawn_basic_detection_task(
                 {
                     acquisition_started_at = Some(now);
                 }
-                if changed {
+                if changed || bound_identity_confirmed {
                     agent = agent_presence.current_agent();
                     agent_changed = previous_agent != agent
                         || foreground_action
-                            == ForegroundShellAgentAction::ReportReplacementProcess;
+                            == ForegroundShellAgentAction::ReportReplacementProcess
+                        || bound_identity_confirmed;
                     if agent_changed {
                         pending_idle.clear();
                         last_screen_scan_detection_content_seq = None;
@@ -1042,6 +1180,7 @@ pub struct PaneRuntime {
     content_seq: Arc<AtomicU64>,
     detection_content_seq: Arc<AtomicU64>,
     full_lifecycle_authority_active: Arc<AtomicBool>,
+    bound_agent_identity_hint: Arc<Mutex<Option<BoundAgentIdentityHint>>>,
     detect_reset_notify: Arc<Notify>,
     pending_release: Arc<Mutex<Option<PendingAgentRelease>>>,
     preserve_processes_on_drop: bool,
@@ -1666,6 +1805,15 @@ impl PaneRuntime {
             input_state: self.input_state(),
             terminal_title: self.terminal_title(),
             initial_history_ansi: None,
+            agent_identity_hint: self
+                .bound_agent_identity_hint
+                .lock()
+                .ok()
+                .and_then(|hint| hint.as_ref().cloned())
+                .map(|hint| crate::handoff_runtime::HandoffAgentIdentityHint {
+                    agent: crate::detect::agent_label(hint.agent).to_string(),
+                    process: hint.process,
+                }),
         }
     }
 
@@ -1880,6 +2028,7 @@ impl PaneRuntime {
             input_state,
             terminal_title,
             initial_history_ansi,
+            agent_identity_hint,
         } = state;
         let pane_id = PaneId::from_raw(pane_id);
         use std::os::fd::FromRawFd;
@@ -1986,12 +2135,25 @@ impl PaneRuntime {
         };
 
         let full_lifecycle_authority_active = Arc::new(AtomicBool::new(false));
+        let bound_agent_identity_hint = agent_identity_hint.and_then(|hint| {
+            let agent = crate::detect::parse_agent_label(&hint.agent)?;
+            crate::platform::validate_hook_process_binding(
+                child_pid.load(Ordering::Acquire),
+                &hint.process,
+            )?;
+            Some(BoundAgentIdentityHint {
+                agent,
+                process: hint.process,
+            })
+        });
+        let bound_agent_identity_hint = Arc::new(Mutex::new(bound_agent_identity_hint));
         let (detect_handle, detect_reset_notify, pending_release) = spawn_basic_detection_task(
             pane_id,
             child_pid.clone(),
             terminal.clone(),
             detection_content_seq.clone(),
             full_lifecycle_authority_active.clone(),
+            bound_agent_identity_hint.clone(),
             events,
         );
 
@@ -2007,6 +2169,7 @@ impl PaneRuntime {
             content_seq,
             detection_content_seq,
             full_lifecycle_authority_active,
+            bound_agent_identity_hint,
             detect_reset_notify,
             pending_release,
             preserve_processes_on_drop: true,
@@ -2063,6 +2226,7 @@ impl PaneRuntime {
         let content_seq = Arc::new(AtomicU64::new(0));
         let detection_content_seq = Arc::new(AtomicU64::new(0));
         let full_lifecycle_authority_active = Arc::new(AtomicBool::new(false));
+        let bound_agent_identity_hint = Arc::new(Mutex::new(None));
         {
             let child_pid = child_pid.clone();
             let child_wait_completed = child_wait_completed.clone();
@@ -2170,6 +2334,7 @@ impl PaneRuntime {
             let state_events = events.clone();
             let detection_content_seq = detection_content_seq.clone();
             let full_lifecycle_authority_active_for_task = full_lifecycle_authority_active.clone();
+            let bound_agent_identity_hint_for_task = bound_agent_identity_hint.clone();
             let render_notify = render_notify.clone();
             let render_dirty = render_dirty.clone();
             let detect_reset_notify = Arc::new(Notify::new());
@@ -2178,8 +2343,11 @@ impl PaneRuntime {
             let pending_release_for_task = pending_release.clone();
 
             let handle = tokio::spawn(async move {
-                let mut agent_presence =
-                    AgentDetectionPresence::from_agent(initial_state.detected_agent);
+                let mut agent_presence = AgentDetectionPresence::from_agent(
+                    initial_state
+                        .detected_agent
+                        .or_else(|| bound_agent_identity(&bound_agent_identity_hint_for_task)),
+                );
                 let mut state = AgentState::Idle;
                 let mut last_visible_idle = initial_state.detected_agent.is_some();
                 let mut last_process_check = Instant::now();
@@ -2220,7 +2388,9 @@ impl PaneRuntime {
                     tokio::select! {
                         _ = tokio::time::sleep(tick) => {}
                         _ = detect_reset.notified() => {
-                            agent_presence = AgentDetectionPresence::from_agent(None);
+                            agent_presence = AgentDetectionPresence::from_agent(
+                                bound_agent_identity(&bound_agent_identity_hint_for_task),
+                            );
                             state = AgentState::Unknown;
                             last_visible_idle = false;
                             last_foreground_pgid = None;
@@ -2280,11 +2450,14 @@ impl PaneRuntime {
                     );
                     #[cfg(not(windows))]
                     let foreground_observation_due = true;
-                    let foreground_pgid = match (pid, foreground_observation_due) {
+                    let foreground_pgid = bound_hint_process_group(
+                        &bound_agent_identity_hint_for_task,
+                    )
+                    .or_else(|| match (pid, foreground_observation_due) {
                         (0, _) => None,
                         (_, true) => detect::foreground_process_group_id(pid),
                         _ => last_foreground_pgid,
-                    };
+                    });
                     #[cfg(windows)]
                     if pid > 0 && foreground_observation_due {
                         let retry =
@@ -2310,7 +2483,11 @@ impl PaneRuntime {
                         let had_process_probe = has_process_probe;
                         has_process_probe = true;
                         if pid > 0 {
-                            let probe = probe_foreground_process(pid, foreground_pgid);
+                            let probe = probe_foreground_process_with_bound_hint(
+                                pid,
+                                foreground_pgid,
+                                &bound_agent_identity_hint_for_task,
+                            );
                             let process_name = probe.process_name;
                             let process_group_id = probe.process_group_id;
                             let tracked_process_group_id = process_group_for_change_tracking(
@@ -2345,6 +2522,12 @@ impl PaneRuntime {
                                 &mut pending_foreground_shell_clear,
                                 &mut foreground_shell_exit_reported,
                             );
+                            let bound_identity_confirmed = confirms_bound_identity(
+                                &bound_agent_identity_hint_for_task,
+                                had_process_probe,
+                                previous_agent,
+                                new_agent,
+                            );
                             last_foreground_pgid = tracked_process_group_id;
                             if new_agent.is_some() {
                                 acquisition_started_at = None;
@@ -2356,11 +2539,12 @@ impl PaneRuntime {
                                 acquisition_started_at = Some(now);
                             }
                             pending_restore_probe = false;
-                            if changed {
+                            if changed || bound_identity_confirmed {
                                 agent = agent_presence.current_agent();
                                 if agent != previous_agent
                                     || foreground_action
                                         == ForegroundShellAgentAction::ReportReplacementProcess
+                                    || bound_identity_confirmed
                                 {
                                     pending_idle.clear();
                                     last_screen_scan_detection_content_seq = None;
@@ -2558,6 +2742,7 @@ impl PaneRuntime {
             content_seq,
             detection_content_seq,
             full_lifecycle_authority_active,
+            bound_agent_identity_hint,
             detect_reset_notify,
             pending_release,
             preserve_processes_on_drop: false,
@@ -2573,6 +2758,73 @@ impl PaneRuntime {
             });
         }
         self.detect_reset_notify.notify_one();
+    }
+
+    /// The binding still names the pane's foreground job, and that job does not
+    /// visibly run some other agent.
+    fn binding_vouches_for_agent(
+        pane_shell_pid: u32,
+        agent: Agent,
+        binding: &crate::platform::HookProcessBinding,
+    ) -> bool {
+        crate::platform::validate_hook_process_binding(pane_shell_pid, binding).is_some_and(|job| {
+            !crate::detect::identify_agent_in_job(&job)
+                .is_some_and(|(identified, _)| identified != agent)
+        })
+    }
+
+    /// An installed binding that is still live and disagrees with this one.
+    fn has_conflicting_live_binding(
+        active: Option<&BoundAgentIdentityHint>,
+        pane_shell_pid: u32,
+        agent: Agent,
+        binding: &crate::platform::HookProcessBinding,
+    ) -> bool {
+        active.is_some_and(|existing| {
+            (existing.agent != agent || &existing.process != binding)
+                && crate::platform::hook_process_binding_is_live(pane_shell_pid, &existing.process)
+        })
+    }
+
+    pub(crate) fn resolve_agent_identity_binding(
+        &self,
+        reporter_pid: u32,
+        agent: Agent,
+    ) -> Option<crate::platform::HookProcessBinding> {
+        let pane_shell_pid = self.child_pid()?;
+        let binding = crate::platform::resolve_hook_process_binding(pane_shell_pid, reporter_pid)?;
+        if !Self::binding_vouches_for_agent(pane_shell_pid, agent, &binding) {
+            return None;
+        }
+        let active = self.bound_agent_identity_hint.lock().ok()?;
+        (!Self::has_conflicting_live_binding(active.as_ref(), pane_shell_pid, agent, &binding))
+            .then_some(binding)
+    }
+
+    pub(crate) fn install_agent_identity_binding(
+        &self,
+        agent: Agent,
+        binding: crate::platform::HookProcessBinding,
+    ) -> bool {
+        let Some(pane_shell_pid) = self.child_pid() else {
+            return false;
+        };
+        if !Self::binding_vouches_for_agent(pane_shell_pid, agent, &binding) {
+            return false;
+        }
+        let Ok(mut active) = self.bound_agent_identity_hint.lock() else {
+            return false;
+        };
+        if Self::has_conflicting_live_binding(active.as_ref(), pane_shell_pid, agent, &binding) {
+            return false;
+        }
+        *active = Some(BoundAgentIdentityHint {
+            agent,
+            process: binding,
+        });
+        drop(active);
+        self.detect_reset_notify.notify_one();
+        true
     }
 
     pub fn reset_agent_detection(&self) {
@@ -3062,6 +3314,7 @@ impl PaneRuntime {
                 content_seq: Arc::new(AtomicU64::new(0)),
                 detection_content_seq: Arc::new(AtomicU64::new(0)),
                 full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
+                bound_agent_identity_hint: Arc::new(Mutex::new(None)),
                 detect_reset_notify: Arc::new(Notify::new()),
                 pending_release: Arc::new(Mutex::new(None)),
                 preserve_processes_on_drop: true,
@@ -3572,6 +3825,26 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[tokio::test]
+    async fn handoff_runtime_state_captures_volatile_agent_identity_binding() {
+        let runtime = PaneRuntime::test_with_screen_bytes(80, 24, b"");
+        let binding = crate::platform::HookProcessBinding {
+            process_group_id: 90,
+            generation: 12,
+        };
+        *runtime.bound_agent_identity_hint.lock().unwrap() = Some(BoundAgentIdentityHint {
+            agent: Agent::Codex,
+            process: binding.clone(),
+        });
+
+        let pane = runtime.handoff_runtime_state(12);
+
+        let hint = pane.agent_identity_hint.unwrap();
+        assert_eq!(hint.agent, "codex");
+        assert_eq!(hint.process, binding);
+    }
+
+    #[cfg(unix)]
     #[test]
     fn truncate_handoff_history_keeps_recent_utf8_boundary() {
         let history = format!("old\n{}\nrecent\n", "é".repeat(8));
@@ -3617,6 +3890,7 @@ mod tests {
             content_seq: Arc::new(AtomicU64::new(0)),
             detection_content_seq: Arc::new(AtomicU64::new(0)),
             full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
+            bound_agent_identity_hint: Arc::new(Mutex::new(None)),
             detect_reset_notify: Arc::new(Notify::new()),
             pending_release: Arc::new(Mutex::new(None)),
             preserve_processes_on_drop: true,
@@ -3649,6 +3923,7 @@ mod tests {
             content_seq: Arc::new(AtomicU64::new(0)),
             detection_content_seq: Arc::new(AtomicU64::new(0)),
             full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
+            bound_agent_identity_hint: Arc::new(Mutex::new(None)),
             detect_reset_notify: Arc::new(Notify::new()),
             pending_release: Arc::new(Mutex::new(None)),
             preserve_processes_on_drop: true,
@@ -3841,6 +4116,118 @@ mod tests {
 
         assert_eq!(result.agent, Some(Agent::Claude));
         assert_eq!(result.process_name.as_deref(), Some("claude"));
+    }
+
+    fn codex_bound_identity_hint() -> BoundAgentIdentityHint {
+        BoundAgentIdentityHint {
+            agent: Agent::Codex,
+            process: crate::platform::HookProcessBinding {
+                process_group_id: 99,
+                generation: 7,
+            },
+        }
+    }
+
+    fn unidentified_process_probe() -> ProcessProbeResult {
+        ProcessProbeResult {
+            process_group_id: Some(99),
+            foreground_is_pane_shell: false,
+            agent: None,
+            process_name: Some("renamed-agent".to_string()),
+        }
+    }
+
+    #[test]
+    fn matching_process_bound_identity_supplies_only_agent_identity() {
+        let job = crate::platform::ForegroundJob {
+            process_group_id: 99,
+            processes: vec![foreground_process(99, "renamed-agent")],
+        };
+        let (probe, disposition) = apply_bound_hint_to_probe(
+            42,
+            unidentified_process_probe(),
+            &codex_bound_identity_hint(),
+            || panic!("liveness is implied by materializing the job"),
+            || Some(job),
+        );
+
+        assert_eq!(probe.agent, Some(Agent::Codex));
+        assert_eq!(probe.process_group_id, Some(99));
+        assert_eq!(probe.process_name.as_deref(), Some("codex"));
+        assert!(!probe.foreground_is_pane_shell);
+        assert_eq!(disposition, BoundHintDisposition::Keep);
+    }
+
+    #[test]
+    fn stale_process_bound_identity_is_cleared() {
+        let (probe, disposition) = apply_bound_hint_to_probe(
+            42,
+            unidentified_process_probe(),
+            &codex_bound_identity_hint(),
+            || panic!("liveness is implied by materializing the job"),
+            || None,
+        );
+
+        assert_eq!(probe.agent, None);
+        assert_eq!(disposition, BoundHintDisposition::Invalidated);
+    }
+
+    #[test]
+    fn known_conflicting_process_identity_wins_and_clears_hook_hint() {
+        let known_probe = ProcessProbeResult {
+            agent: Some(Agent::Claude),
+            process_name: Some("claude".to_string()),
+            ..unidentified_process_probe()
+        };
+        let (probe, disposition) = apply_bound_hint_to_probe(
+            42,
+            known_probe,
+            &codex_bound_identity_hint(),
+            || true,
+            || panic!("an already identified probe must not walk the process tree"),
+        );
+
+        assert_eq!(probe.agent, Some(Agent::Claude));
+        assert_eq!(disposition, BoundHintDisposition::ClearConflict);
+    }
+
+    #[test]
+    fn recognized_matching_process_does_not_keep_stale_binding_alive() {
+        let known_probe = ProcessProbeResult {
+            agent: Some(Agent::Codex),
+            process_name: Some("codex-raw".to_string()),
+            ..unidentified_process_probe()
+        };
+        let (probe, disposition) = apply_bound_hint_to_probe(
+            42,
+            known_probe,
+            &codex_bound_identity_hint(),
+            || false,
+            || panic!("an already identified probe must not walk the process tree"),
+        );
+
+        assert_eq!(probe.agent, Some(Agent::Codex));
+        assert_eq!(disposition, BoundHintDisposition::Invalidated);
+    }
+
+    #[test]
+    fn identified_matching_agent_checks_liveness_without_materializing_the_job() {
+        let known_probe = ProcessProbeResult {
+            agent: Some(Agent::Codex),
+            process_name: Some("codex".to_string()),
+            ..unidentified_process_probe()
+        };
+        let (probe, disposition) = apply_bound_hint_to_probe(
+            42,
+            known_probe,
+            &codex_bound_identity_hint(),
+            || true,
+            || panic!("an already identified probe must not walk the process tree"),
+        );
+
+        assert_eq!(probe.agent, Some(Agent::Codex));
+        assert_eq!(probe.process_name.as_deref(), Some("codex"));
+        assert_eq!(disposition, BoundHintDisposition::Keep);
     }
 
     fn process_probe_input() -> ProcessProbeInput {

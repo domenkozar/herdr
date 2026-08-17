@@ -18,6 +18,18 @@ pub struct ForegroundJob {
     pub processes: Vec<ForegroundProcess>,
 }
 
+/// Stable-enough identity for a foreground job reported by an agent hook.
+///
+/// The numeric process id/group alone is not sufficient because operating
+/// systems may reuse it after the original process exits. Platform code owns
+/// both resolving and validating the generation token.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct HookProcessBinding {
+    /// Group leader pid on unix; root pid of the pane job on Windows.
+    pub(crate) process_group_id: u32,
+    pub(crate) generation: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Signal {
     Hangup,
