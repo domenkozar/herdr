@@ -2680,6 +2680,34 @@ impl AppState {
                 continue;
             };
 
+            if let Some(tab_idx) = result.tab_idx {
+                // Drop results whose directory no longer matches the tab, the
+                // same staleness guard the workspace path uses below.
+                let current = self.workspaces[ws_idx]
+                    .tabs
+                    .get(tab_idx)
+                    .and_then(|tab| tab.resolved_git_cwd(&self.terminals, terminal_runtimes));
+                if current.as_ref() != Some(&result.resolved_identity_cwd) {
+                    continue;
+                }
+                let Some(tab) = self.workspaces[ws_idx].tabs.get_mut(tab_idx) else {
+                    continue;
+                };
+                if tab.git.cwd.as_ref() != Some(&result.resolved_identity_cwd) {
+                    tab.git.cwd = Some(result.resolved_identity_cwd.clone());
+                    changed = true;
+                }
+                if result.demand.branch && tab.git.branch != result.branch {
+                    tab.git.branch = result.branch;
+                    changed = true;
+                }
+                if result.demand.ahead_behind && tab.git.ahead_behind != result.ahead_behind {
+                    tab.git.ahead_behind = result.ahead_behind;
+                    changed = true;
+                }
+                continue;
+            }
+
             if self.workspaces[ws_idx]
                 .resolved_identity_cwd_from(&self.terminals, terminal_runtimes)
                 .as_ref()
@@ -4075,6 +4103,7 @@ mod tests {
             &terminal_runtimes,
             vec![WorkspaceGitStatus {
                 workspace_id: first_id,
+                tab_idx: None,
                 resolved_identity_cwd: first_cwd.clone(),
                 status_cache_key: first_cwd,
                 demand: crate::workspace::GitStatusRefreshDemand::ALL,
@@ -4093,6 +4122,68 @@ mod tests {
     }
 
     #[test]
+    fn apply_workspace_git_statuses_routes_tab_results_to_that_tab_only() {
+        let mut state = app_with_workspaces(&["one"]);
+        state.workspaces[0].test_add_tab(Some("second"));
+        state.ensure_test_terminals();
+        let workspace_id = state.workspaces[0].id.clone();
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        let tab_cwd = state.workspaces[0].tabs[1]
+            .resolved_git_cwd(&state.terminals, &terminal_runtimes)
+            .expect("tab cwd");
+
+        let changed = state.apply_workspace_git_statuses(
+            &terminal_runtimes,
+            vec![WorkspaceGitStatus {
+                workspace_id,
+                tab_idx: Some(1),
+                resolved_identity_cwd: tab_cwd.clone(),
+                status_cache_key: tab_cwd.clone(),
+                demand: crate::workspace::GitStatusRefreshDemand::ALL,
+                auto_label: "one".into(),
+                branch: Some("feature".into()),
+                ahead_behind: Some((3, 0)),
+                space: None,
+            }],
+        );
+
+        assert!(changed);
+        assert_eq!(
+            state.workspaces[0].tabs[1].git.branch.as_deref(),
+            Some("feature")
+        );
+        assert_eq!(state.workspaces[0].tabs[1].git.ahead_behind, Some((3, 0)));
+        // The sibling tab and the workspace itself stay untouched.
+        assert_eq!(state.workspaces[0].tabs[0].git.branch, None);
+        assert_eq!(state.workspaces[0].tabs[0].git.cwd, None);
+    }
+
+    #[test]
+    fn apply_workspace_git_statuses_ignores_stale_tab_cwd() {
+        let mut state = app_with_workspaces(&["one"]);
+        let workspace_id = state.workspaces[0].id.clone();
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+
+        let changed = state.apply_workspace_git_statuses(
+            &terminal_runtimes,
+            vec![WorkspaceGitStatus {
+                workspace_id,
+                tab_idx: Some(0),
+                resolved_identity_cwd: std::path::PathBuf::from("/definitely/not/current"),
+                status_cache_key: std::path::PathBuf::from("/definitely/not/current"),
+                demand: crate::workspace::GitStatusRefreshDemand::ALL,
+                auto_label: "stale".into(),
+                branch: Some("stale".into()),
+                ahead_behind: Some((9, 9)),
+                space: None,
+            }],
+        );
+
+        assert!(!changed);
+        assert_eq!(state.workspaces[0].tabs[0].git.branch, None);
+    }
+
+    #[test]
     fn apply_workspace_git_statuses_ignores_stale_cwd() {
         let mut state = app_with_workspaces(&["one"]);
         let workspace_id = state.workspaces[0].id.clone();
@@ -4104,6 +4195,7 @@ mod tests {
             &terminal_runtimes,
             vec![WorkspaceGitStatus {
                 workspace_id,
+                tab_idx: None,
                 resolved_identity_cwd: std::path::PathBuf::from("/definitely/not/current"),
                 status_cache_key: std::path::PathBuf::from("/definitely/not/current"),
                 demand: crate::workspace::GitStatusRefreshDemand::ALL,
@@ -4132,6 +4224,7 @@ mod tests {
             &terminal_runtimes,
             vec![WorkspaceGitStatus {
                 workspace_id,
+                tab_idx: None,
                 resolved_identity_cwd: cwd.clone(),
                 status_cache_key: cwd,
                 demand: crate::workspace::GitStatusRefreshDemand {
@@ -4162,6 +4255,7 @@ mod tests {
             &terminal_runtimes,
             vec![WorkspaceGitStatus {
                 workspace_id,
+                tab_idx: None,
                 resolved_identity_cwd: cwd.clone(),
                 status_cache_key: cwd,
                 demand: crate::workspace::GitStatusRefreshDemand::ALL,
@@ -4190,6 +4284,7 @@ mod tests {
             &terminal_runtimes,
             vec![WorkspaceGitStatus {
                 workspace_id,
+                tab_idx: None,
                 resolved_identity_cwd: cwd.clone(),
                 status_cache_key: cwd,
                 demand: crate::workspace::GitStatusRefreshDemand::ALL,

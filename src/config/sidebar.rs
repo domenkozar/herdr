@@ -131,6 +131,28 @@ pub enum SpaceSidebarToken {
     },
 }
 
+/// Tokens available to per-tab rows nested inside a Space entry. A tab carries
+/// both agent facts (state, agent name, terminal title) and repository facts
+/// (branch, ahead/behind), so this set is their union rather than a reuse of
+/// either neighbouring enum.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TabSidebarToken {
+    StateIcon,
+    StateText,
+    Workspace,
+    Tab,
+    Agent,
+    TerminalTitle,
+    TerminalTitleStripped,
+    Branch,
+    GitStatus,
+    Custom(String),
+    Styled {
+        token: Box<TabSidebarToken>,
+        style: SidebarTokenStyle,
+    },
+}
+
 impl AgentSidebarToken {
     pub(crate) fn parts(&self) -> (&Self, SidebarTokenStyle) {
         match self {
@@ -141,6 +163,15 @@ impl AgentSidebarToken {
 }
 
 impl SpaceSidebarToken {
+    pub(crate) fn parts(&self) -> (&Self, SidebarTokenStyle) {
+        match self {
+            Self::Styled { token, style } => (token, *style),
+            token => (token, SidebarTokenStyle::default()),
+        }
+    }
+}
+
+impl TabSidebarToken {
     pub(crate) fn parts(&self) -> (&Self, SidebarTokenStyle) {
         match self {
             Self::Styled { token, style } => (token, *style),
@@ -257,6 +288,22 @@ fn space_token_name(token: &SpaceSidebarToken) -> String {
     }
 }
 
+fn tab_token_name(token: &TabSidebarToken) -> String {
+    match token {
+        TabSidebarToken::StateIcon => "state_icon".into(),
+        TabSidebarToken::StateText => "state_text".into(),
+        TabSidebarToken::Workspace => "workspace".into(),
+        TabSidebarToken::Tab => "tab".into(),
+        TabSidebarToken::Agent => "agent".into(),
+        TabSidebarToken::TerminalTitle => "terminal_title".into(),
+        TabSidebarToken::TerminalTitleStripped => "terminal_title_stripped".into(),
+        TabSidebarToken::Branch => "branch".into(),
+        TabSidebarToken::GitStatus => "git_status".into(),
+        TabSidebarToken::Custom(name) => format!("${name}"),
+        TabSidebarToken::Styled { token, .. } => tab_token_name(token),
+    }
+}
+
 impl Serialize for AgentSidebarToken {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -348,8 +395,57 @@ impl<'de> Deserialize<'de> for SpaceSidebarToken {
     }
 }
 
+impl Serialize for TabSidebarToken {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Styled { token, style } => {
+                serialize_styled_token(tab_token_name(token), *style, serializer)
+            }
+            token => serializer.serialize_str(&tab_token_name(token)),
+        }
+    }
+}
+
+impl From<String> for TabSidebarToken {
+    fn from(value: String) -> Self {
+        Self::Custom(value)
+    }
+}
+
+impl<'de> Deserialize<'de> for TabSidebarToken {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let (value, style) = RawSidebarToken::deserialize(deserializer)?.parts();
+        let token = parse_sidebar_token(
+            value,
+            &[
+                ("state_icon", Self::StateIcon),
+                ("state_text", Self::StateText),
+                ("workspace", Self::Workspace),
+                ("tab", Self::Tab),
+                ("agent", Self::Agent),
+                ("terminal_title", Self::TerminalTitle),
+                ("terminal_title_stripped", Self::TerminalTitleStripped),
+                ("branch", Self::Branch),
+                ("git_status", Self::GitStatus),
+            ],
+        )
+        .map_err(serde::de::Error::custom)?;
+        Ok(style.map_or(token.clone(), |style| Self::Styled {
+            token: Box::new(token),
+            style,
+        }))
+    }
+}
+
 type AgentSidebarRows = Vec<Vec<AgentSidebarToken>>;
 type SpaceSidebarRows = Vec<Vec<SpaceSidebarToken>>;
+type TabSidebarRows = Vec<Vec<TabSidebarToken>>;
 
 fn deserialize_rows_by_agent<'de, D>(
     deserializer: D,
@@ -409,7 +505,17 @@ impl Default for AgentsSidebarConfig {
 pub struct SpacesSidebarConfig {
     #[serde(deserialize_with = "deserialize_sidebar_rows")]
     pub rows: SpaceSidebarRows,
+    /// Rendered once per tab underneath each Space entry. Empty by default, so
+    /// Spaces keep showing only their rolled-up `rows` until opted in.
+    #[serde(default, deserialize_with = "deserialize_sidebar_rows")]
+    pub tab_rows: TabSidebarRows,
     pub row_gap: u16,
+}
+
+impl SpacesSidebarConfig {
+    pub(crate) fn has_tab_rows(&self) -> bool {
+        !self.tab_rows.is_empty()
+    }
 }
 
 impl Default for SpacesSidebarConfig {
@@ -419,6 +525,7 @@ impl Default for SpacesSidebarConfig {
                 vec![SpaceSidebarToken::StateIcon, SpaceSidebarToken::Workspace],
                 vec![SpaceSidebarToken::Branch, SpaceSidebarToken::GitStatus],
             ],
+            tab_rows: Vec::new(),
             row_gap: DEFAULT_SIDEBAR_ROW_GAP,
         }
     }
@@ -459,6 +566,57 @@ mod tests {
             ]
         );
         assert_eq!(config.spaces.row_gap, 0);
+        assert!(config.spaces.tab_rows.is_empty());
+        assert!(!config.spaces.has_tab_rows());
+    }
+
+    #[test]
+    fn spaces_tab_rows_parse_agent_and_git_tokens_together() {
+        let config: crate::config::Config = toml::from_str(
+            r#"
+[ui.sidebar.spaces]
+rows = [["state_icon", "workspace"]]
+tab_rows = [["state_icon", "tab", "agent"], ["branch", "git_status", "$model"]]
+"#,
+        )
+        .expect("tab row config");
+
+        assert!(config.ui.sidebar.spaces.has_tab_rows());
+        assert_eq!(
+            config.ui.sidebar.spaces.tab_rows,
+            vec![
+                vec![
+                    TabSidebarToken::StateIcon,
+                    TabSidebarToken::Tab,
+                    TabSidebarToken::Agent,
+                ],
+                vec![
+                    TabSidebarToken::Branch,
+                    TabSidebarToken::GitStatus,
+                    TabSidebarToken::Custom("model".into()),
+                ],
+            ]
+        );
+    }
+
+    #[test]
+    fn spaces_tab_rows_accept_styles_and_reject_pane_only_tokens() {
+        let config: crate::config::Config = toml::from_str(
+            r##"
+[ui.sidebar.spaces]
+tab_rows = [[{ token = "branch", fg = "#ff00aa", bold = true }]]
+"##,
+        )
+        .expect("styled tab row");
+        let (token, style) = config.ui.sidebar.spaces.tab_rows[0][0].parts();
+        assert_eq!(token, &TabSidebarToken::Branch);
+        assert_eq!(style.bold, Some(true));
+
+        // `pane` is a pane-level Agent-panel token with no per-tab meaning.
+        assert!(toml::from_str::<crate::config::Config>(
+            "[ui.sidebar.spaces]\ntab_rows = [[\"pane\"]]\n"
+        )
+        .is_err());
     }
 
     #[test]

@@ -727,6 +727,7 @@ fn restore_tab(
                 events: runtime_context.events.clone(),
                 render_notify: runtime_context.render_notify.clone(),
                 render_dirty: runtime_context.render_dirty.clone(),
+                git: crate::workspace::TabGitCache::default(),
             },
             terminals,
             terminal_runtimes,

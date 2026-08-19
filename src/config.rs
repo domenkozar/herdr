@@ -29,7 +29,7 @@ pub use self::{
     },
     sidebar::{
         AgentSidebarToken, AgentsSidebarConfig, SidebarConfig, SidebarTokenStyle,
-        SpaceSidebarToken, SpacesSidebarConfig,
+        SpaceSidebarToken, SpacesSidebarConfig, TabSidebarToken,
     },
     sound::SoundConfig,
     tab_bar::TabBarRightEntryConfig,

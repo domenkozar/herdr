@@ -368,6 +368,54 @@ Space rows accept these built-in tokens:
 - `git_status` — Git ahead and behind counts when nonzero.
 - `$name` — custom workspace metadata named `name`.
 
+#### Per-tab rows inside a Space
+
+`state_icon` and `state_text` on a Space row are a rollup: they collapse every
+pane in the Space to the single most demanding state. To see each tab separately
+instead, add `tab_rows`. It is empty by default, and each configured row renders
+once per tab, nested under the Space:
+
+```toml
+[ui.sidebar.spaces]
+rows = [
+  ["state_icon", "workspace"],
+]
+tab_rows = [
+  ["state_icon", "tab", "agent"],
+  ["branch", "git_status"],
+]
+```
+
+```text
+▶ herdr
+  ├─ ▶ 1 · claude
+  │    feat-login · ↑2
+  └─ ■ 2 · codex
+       feat-search · ↑1 ↓3
+```
+
+Tab rows accept the Space tokens plus the agent-facing ones:
+
+- `state_icon`, `state_text` — this tab's own agent state, rolled up across only
+  that tab's panes.
+- `tab` — tab name.
+- `workspace` — workspace name.
+- `agent` — agent display name from the tab's focused pane.
+- `terminal_title`, `terminal_title_stripped` — terminal title from the tab's focused pane.
+- `branch` — Git branch for the tab's own working directory.
+- `git_status` — ahead and behind counts for the tab's own working directory.
+- `$name` — custom pane metadata named `name`, from the tab's focused pane.
+
+`branch` and `git_status` here resolve against each tab's own directory, which
+matters because a tab created with `herdr tab create --cwd <path>` can live in a
+different worktree, or a different repository, from the rest of its Space. Herdr
+resolves per-tab Git values only while a `tab_rows` layout actually contains
+`branch` or `git_status`; results for tabs sharing one repository are still
+fetched once and shared. Until the first per-tab result arrives, a tab shows its
+workspace's branch.
+
+`pane` is not available in tab rows, since a tab may hold several panes.
+
 Tokens render in their configured order. Herdr normally separates adjacent values with ` · ` and uses a single space after `state_icon`. Missing values and their separators disappear; a row disappears when none of its tokens have a value. Each layout may contain at most 16 rows, with at most 16 tokens in each row.
 
 A token entry can also be an inline style table:

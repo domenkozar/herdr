@@ -82,6 +82,61 @@ fn pane_attention_priority(state: AgentState, seen: bool) -> u8 {
     }
 }
 
+/// Agent-facing facts for one tab, used by the per-tab Space sidebar rows.
+/// Pane-level values come from the tab's focused pane, which is the pane the
+/// user sees when they switch to that tab.
+pub struct TabAgentSummary {
+    pub state: AgentState,
+    pub seen: bool,
+    pub agent_label: Option<String>,
+    pub terminal_title: Option<String>,
+    pub terminal_title_stripped: Option<String>,
+    pub tokens: HashMap<String, String>,
+}
+
+impl Tab {
+    /// Rolls up only this tab's panes, unlike [`Workspace::aggregate_state`]
+    /// which spans every tab.
+    pub fn aggregate_state(
+        &self,
+        terminals: &HashMap<TerminalId, TerminalState>,
+    ) -> (AgentState, bool) {
+        self.panes
+            .values()
+            .filter_map(|pane| {
+                terminals
+                    .get(&pane.attached_terminal_id)
+                    .map(|terminal| (terminal.state, pane.seen))
+            })
+            .max_by_key(|(state, seen)| pane_attention_priority(*state, *seen))
+            .unwrap_or((AgentState::Unknown, true))
+    }
+
+    pub fn agent_summary(&self, terminals: &HashMap<TerminalId, TerminalState>) -> TabAgentSummary {
+        let (state, seen) = self.aggregate_state(terminals);
+        let focused = self
+            .panes
+            .get(&self.layout.focused())
+            .and_then(|pane| terminals.get(&pane.attached_terminal_id));
+        TabAgentSummary {
+            state,
+            seen,
+            agent_label: focused.and_then(|terminal| {
+                terminal
+                    .effective_display_agent()
+                    .or_else(|| terminal.agent_name.clone())
+                    .or_else(|| terminal.effective_agent_label().map(str::to_string))
+            }),
+            terminal_title: focused.and_then(|terminal| terminal.terminal_title.clone()),
+            terminal_title_stripped: focused
+                .and_then(|terminal| terminal.terminal_title_stripped()),
+            tokens: focused
+                .map(|terminal| terminal.metadata_tokens.values())
+                .unwrap_or_default(),
+        }
+    }
+}
+
 impl Workspace {
     pub fn aggregate_state(
         &self,
@@ -141,6 +196,59 @@ mod tests {
         let (state, seen) = ws.aggregate_state(&terminals);
         assert_eq!(state, AgentState::Unknown);
         assert!(seen);
+    }
+
+    #[test]
+    fn tab_aggregate_state_ignores_other_tabs() {
+        let mut ws = Workspace::test_new("test");
+        ws.test_add_tab(Some("second"));
+        let first_pane = ws.tabs[0].root_pane;
+        let second_pane = ws.tabs[1].root_pane;
+        let mut terminals = HashMap::new();
+        let mut first = TerminalState::new(
+            ws.tabs[0].terminal_id(first_pane).unwrap().clone(),
+            "/tmp".into(),
+        );
+        first.state = AgentState::Idle;
+        terminals.insert(first.id.clone(), first);
+        let mut second = TerminalState::new(
+            ws.tabs[1].terminal_id(second_pane).unwrap().clone(),
+            "/tmp".into(),
+        );
+        second.state = AgentState::Working;
+        terminals.insert(second.id.clone(), second);
+
+        assert_eq!(ws.tabs[0].aggregate_state(&terminals).0, AgentState::Idle);
+        assert_eq!(
+            ws.tabs[1].aggregate_state(&terminals).0,
+            AgentState::Working
+        );
+        // The workspace rollup still spans both tabs.
+        assert_eq!(ws.aggregate_state(&terminals).0, AgentState::Working);
+    }
+
+    #[test]
+    fn tab_agent_summary_reads_the_focused_pane() {
+        let mut ws = Workspace::test_new("test");
+        let split = ws.test_split(Direction::Horizontal);
+        let focused = ws.tabs[0].layout.focused();
+        assert_eq!(focused, split);
+        let mut terminals = HashMap::new();
+        for (pane_id, agent) in [(focused, "claude"), (ws.tabs[0].root_pane, "codex")] {
+            if pane_id == ws.tabs[0].root_pane && pane_id == focused {
+                continue;
+            }
+            let mut terminal = TerminalState::new(
+                ws.tabs[0].terminal_id(pane_id).unwrap().clone(),
+                "/tmp".into(),
+            );
+            terminal.agent_name = Some(agent.to_string());
+            terminals.insert(terminal.id.clone(), terminal);
+        }
+
+        let summary = ws.tabs[0].agent_summary(&terminals);
+
+        assert_eq!(summary.agent_label.as_deref(), Some("claude"));
     }
 
     #[test]

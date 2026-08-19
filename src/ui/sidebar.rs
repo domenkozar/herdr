@@ -8,7 +8,7 @@ use ratatui::{
     Frame,
 };
 
-use self::tokens::{ResolvedToken, ResolvedTokenKind, SpaceTokenContext};
+use self::tokens::{ResolvedToken, ResolvedTokenKind, SpaceTokenContext, TabTokenContext};
 use super::scrollbar::{render_scrollbar, should_show_scrollbar};
 use super::status::{state_icon, state_label, state_label_color};
 use super::text::{display_width, display_width_u16, truncate_end};
@@ -193,6 +193,98 @@ pub(super) fn agent_panel_status_key(state: AgentState, seen: bool) -> &'static 
     }
 }
 
+/// Resolves the per-tab rows nested under one Space entry, one block per tab.
+///
+/// Returns empty unless `ui.sidebar.spaces.tab_rows` is configured, so the
+/// default layout pays nothing for this path. Height and render both go through
+/// here so their line counts cannot drift apart.
+struct TabRowBlock {
+    tab_idx: usize,
+    state: AgentState,
+    seen: bool,
+    rows: Vec<Vec<ResolvedToken>>,
+}
+
+fn workspace_tab_row_blocks(
+    app: &AppState,
+    ws: &crate::workspace::Workspace,
+    workspace_label: &str,
+) -> Vec<TabRowBlock> {
+    if !app.sidebar_spaces.has_tab_rows() {
+        return Vec::new();
+    }
+
+    ws.tabs
+        .iter()
+        .enumerate()
+        .filter_map(|(tab_idx, tab)| {
+            let summary = tab.agent_summary(&app.terminals);
+            let tab_label = ws
+                .tab_display_name(tab_idx)
+                .unwrap_or_else(|| (tab_idx + 1).to_string());
+            // Before the first per-tab refresh lands, fall back to the
+            // workspace values, but only while the tab has not been resolved to
+            // a different directory — otherwise the row would show a branch
+            // that belongs to another repository.
+            let (branch, ahead_behind) = match tab.git.cwd.as_ref() {
+                Some(_) => (tab.git.branch.clone(), tab.git.ahead_behind),
+                None => (ws.branch(), ws.git_ahead_behind()),
+            };
+            let rows = tokens::tab_rows(
+                &app.sidebar_spaces,
+                TabTokenContext {
+                    workspace: workspace_label,
+                    tab: &tab_label,
+                    state_text: state_label(summary.state, summary.seen),
+                    agent_label: summary.agent_label.as_deref(),
+                    terminal_title: summary.terminal_title.as_deref(),
+                    terminal_title_stripped: summary.terminal_title_stripped.as_deref(),
+                    branch: branch.as_deref(),
+                    ahead_behind,
+                    tokens: &summary.tokens,
+                },
+            );
+            (!rows.is_empty()).then_some(TabRowBlock {
+                tab_idx,
+                state: summary.state,
+                seen: summary.seen,
+                rows,
+            })
+        })
+        .collect()
+}
+
+/// Tree prefix for a per-tab row nested under a Space entry. Mirrors the
+/// worktree-child guides so both nesting levels read as one tree.
+fn tab_row_prefix(
+    p: &Palette,
+    card_indented: bool,
+    parent_is_last_child: bool,
+    is_last_tab: bool,
+    first_line: bool,
+) -> (Vec<Span<'static>>, u16) {
+    let mut spans = vec![Span::raw("   ")];
+    let mut width = 3u16;
+    if card_indented {
+        if parent_is_last_child {
+            spans.push(Span::raw("    "));
+        } else {
+            spans.push(Span::styled("│", Style::default().fg(p.overlay0)));
+            spans.push(Span::raw("   "));
+        }
+        width += 4;
+    }
+    if first_line {
+        spans.push(Span::styled(
+            if is_last_tab { "└─ " } else { "├─ " },
+            Style::default().fg(p.overlay0),
+        ));
+    } else {
+        spans.push(Span::raw("   "));
+    }
+    (spans, width + 3)
+}
+
 fn workspace_row_height(app: &AppState, ws: &crate::workspace::Workspace, indented: bool) -> u16 {
     let (state, seen) = ws.aggregate_state(&app.terminals);
     let label = if indented {
@@ -205,7 +297,7 @@ fn workspace_row_height(app: &AppState, ws: &crate::workspace::Workspace, indent
         ws.display_name_from_terminals(&app.terminals)
     };
     let token_values = ws.metadata_tokens.values();
-    tokens::space_rows(
+    let space_lines = tokens::space_rows(
         &app.sidebar_spaces,
         SpaceTokenContext {
             workspace: &label,
@@ -217,8 +309,13 @@ fn workspace_row_height(app: &AppState, ws: &crate::workspace::Workspace, indent
         },
     )
     .len()
-    .max(1)
-    .min(u16::MAX as usize) as u16
+    .max(1);
+    let tab_lines: usize = workspace_tab_row_blocks(app, ws, &label)
+        .iter()
+        .map(|block| block.rows.len())
+        .sum();
+
+    space_lines.saturating_add(tab_lines).min(u16::MAX as usize) as u16
 }
 
 fn workspace_row_height_in_body(
@@ -1377,6 +1474,45 @@ fn render_workspace_list(
             );
         }
 
+        let tab_blocks = workspace_tab_row_blocks(app, ws, &display_label);
+        let mut tab_line = rows.len().max(1) as u16;
+        for (block_idx, block) in tab_blocks.iter().enumerate() {
+            let is_last_tab = block_idx + 1 == tab_blocks.len();
+            let tab_icon =
+                super::status::state_icon(block.state, block.seen, app.status_indicators, p);
+            let tab_state_style = Style::default()
+                .fg(state_label_color(block.state, block.seen, p))
+                .add_modifier(Modifier::DIM);
+            let tab_name_style = if is_active && ws.active_tab == block.tab_idx {
+                Style::default().fg(p.text)
+            } else {
+                Style::default().fg(p.subtext0).add_modifier(Modifier::DIM)
+            };
+
+            for (line_idx, resolved) in block.rows.iter().enumerate() {
+                if tab_line >= row_height || row_y + tab_line >= list_bottom {
+                    break;
+                }
+                let (mut spans, prefix_width) =
+                    tab_row_prefix(p, card.indented, is_last_child, is_last_tab, line_idx == 0);
+                spans.extend(resolved_token_spans(
+                    resolved,
+                    tab_icon,
+                    tab_state_style,
+                    tab_name_style,
+                    branch_style,
+                    branch_style,
+                    p,
+                    card.rect.width.saturating_sub(prefix_width) as usize,
+                ));
+                frame.render_widget(
+                    Paragraph::new(Line::from(spans)),
+                    Rect::new(card.rect.x, row_y + tab_line, card.rect.width, 1),
+                );
+                tab_line = tab_line.saturating_add(1);
+            }
+        }
+
         if let Some((_, collapsed)) = parent_group {
             frame.render_widget(
                 Paragraph::new(Span::styled(
@@ -1617,6 +1753,143 @@ mod tests {
                     row_text(buffer, row, width)
                 )
             })
+    }
+
+    /// Builds a single-space app whose workspace has `tabs.len()` tabs, each
+    /// with one terminal in the given agent state.
+    fn app_with_tabs(tabs: &[(&str, AgentState)]) -> crate::app::state::AppState {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut ws = crate::workspace::Workspace::test_new("repo");
+        for (name, _) in tabs.iter().skip(1) {
+            ws.test_add_tab(Some(name));
+        }
+        if let Some((first, _)) = tabs.first() {
+            ws.tabs[0].custom_name = Some((*first).to_string());
+        }
+        for (tab_idx, (_, state)) in tabs.iter().enumerate() {
+            let pane = ws.tabs[tab_idx].root_pane;
+            let terminal_id = ws.tabs[tab_idx].terminal_id(pane).unwrap().clone();
+            let mut terminal = crate::terminal::TerminalState::new(terminal_id, "/tmp".into());
+            terminal.state = *state;
+            app.terminals.insert(terminal.id.clone(), terminal);
+        }
+        app.workspaces = vec![ws];
+        app.sidebar_spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]];
+        app.sidebar_spaces.row_gap = 0;
+        app
+    }
+
+    #[test]
+    fn tab_rows_are_absent_until_configured() {
+        let app = app_with_tabs(&[("one", AgentState::Working), ("two", AgentState::Idle)]);
+
+        assert_eq!(workspace_row_height(&app, &app.workspaces[0], false), 1);
+    }
+
+    #[test]
+    fn tab_rows_add_one_line_per_tab_to_the_space_entry() {
+        let mut app = app_with_tabs(&[
+            ("one", AgentState::Working),
+            ("two", AgentState::Idle),
+            ("three", AgentState::Blocked),
+        ]);
+        app.sidebar_spaces.tab_rows = vec![vec![
+            crate::config::TabSidebarToken::StateIcon,
+            crate::config::TabSidebarToken::Tab,
+        ]];
+
+        // one space row + three tab rows
+        assert_eq!(workspace_row_height(&app, &app.workspaces[0], false), 4);
+
+        app.sidebar_spaces.tab_rows.push(vec![
+            crate::config::TabSidebarToken::Branch,
+            crate::config::TabSidebarToken::GitStatus,
+        ]);
+        app.workspaces[0].cached_git_branch = Some("main".into());
+        // one space row + three tabs x two rows
+        assert_eq!(workspace_row_height(&app, &app.workspaces[0], false), 7);
+
+        // With no branch and no ahead/behind, the second tab row resolves to
+        // nothing and collapses away exactly like an empty Space row does.
+        app.workspaces[0].cached_git_branch = None;
+        assert_eq!(workspace_row_height(&app, &app.workspaces[0], false), 4);
+    }
+
+    #[test]
+    fn tab_rows_show_each_tabs_own_branch_and_commits() {
+        let mut app = app_with_tabs(&[("alpha", AgentState::Working), ("beta", AgentState::Idle)]);
+        app.sidebar_spaces.tab_rows = vec![vec![
+            crate::config::TabSidebarToken::Tab,
+            crate::config::TabSidebarToken::Branch,
+            crate::config::TabSidebarToken::GitStatus,
+        ]];
+        app.workspaces[0].cached_git_branch = Some("workspace-branch".into());
+        let ws = &mut app.workspaces[0];
+        ws.tabs[0].git = crate::workspace::TabGitCache {
+            cwd: Some("/repo/one".into()),
+            branch: Some("feat-one".into()),
+            ahead_behind: Some((2, 0)),
+        };
+        // The second tab has no per-tab result yet, so it falls back to the
+        // workspace branch rather than showing nothing.
+        let area = Rect::new(0, 0, 40, 12);
+        app.view.workspace_card_areas = compute_workspace_card_areas(&app, area);
+        let card = app.view.workspace_card_areas[0];
+        let list_area = workspace_list_rect(area, app.sidebar_section_split);
+
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_workspace_list(
+                    &app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    list_area,
+                    false,
+                )
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let first = row_text(buffer, card.rect.y + 1, area.width);
+        let second = row_text(buffer, card.rect.y + 2, area.width);
+        assert!(first.contains("feat-one"), "{first:?}");
+        assert!(first.contains("↑2"), "{first:?}");
+        assert!(second.contains("workspace-branch"), "{second:?}");
+        assert!(!second.contains("feat-one"), "{second:?}");
+    }
+
+    #[test]
+    fn tab_rows_render_one_row_per_tab_with_tree_connectors() {
+        let mut app = app_with_tabs(&[("alpha", AgentState::Working), ("beta", AgentState::Idle)]);
+        app.sidebar_spaces.tab_rows = vec![vec![crate::config::TabSidebarToken::Tab]];
+        let area = Rect::new(0, 0, 30, 12);
+        app.view.workspace_card_areas = compute_workspace_card_areas(&app, area);
+        let card = app.view.workspace_card_areas[0];
+        assert_eq!(card.rect.height, 3);
+        let list_area = workspace_list_rect(area, app.sidebar_section_split);
+
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_workspace_list(
+                    &app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    list_area,
+                    false,
+                )
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert!(row_text(buffer, card.rect.y, area.width).contains("repo"));
+        let first = row_text(buffer, card.rect.y + 1, area.width);
+        let second = row_text(buffer, card.rect.y + 2, area.width);
+        assert!(first.contains("├─"), "{first:?}");
+        assert!(first.contains("alpha"), "{first:?}");
+        assert!(second.contains("└─"), "{second:?}");
+        assert!(second.contains("beta"), "{second:?}");
     }
 
     #[test]

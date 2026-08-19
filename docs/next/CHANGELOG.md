@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- `ui.sidebar.spaces.tab_rows` now renders one row per tab inside each Space, showing that tab's own agent state instead of the Space-wide rollup. Its `branch` and `git_status` tokens resolve against each tab's own working directory, so tabs opened in different worktrees no longer all report the first tab's branch.
+
 ## [0.8.2] - 2026-08-19
 
 ### Added

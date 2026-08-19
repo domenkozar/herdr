@@ -7066,6 +7066,7 @@ next_tab = ""
         let changed = server.handle_internal_event_with_forwarding(AppEvent::GitStatusRefreshed {
             results: vec![crate::workspace::WorkspaceGitStatus {
                 workspace_id,
+                tab_idx: None,
                 resolved_identity_cwd: cwd.clone(),
                 status_cache_key: cwd,
                 demand: crate::workspace::GitStatusRefreshDemand::ALL,
@@ -7092,6 +7093,7 @@ next_tab = ""
         let changed = server.handle_internal_event_with_forwarding(AppEvent::GitStatusRefreshed {
             results: vec![crate::workspace::WorkspaceGitStatus {
                 workspace_id,
+                tab_idx: None,
                 resolved_identity_cwd: cwd.clone(),
                 status_cache_key: cwd,
                 demand: crate::workspace::GitStatusRefreshDemand::ALL,

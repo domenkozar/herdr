@@ -9,6 +9,9 @@ use crate::workspace::{GitStatusCacheEntry, GitStatusRefreshDemand, WorkspaceGit
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct WorkspaceGitRefreshItem {
     workspace_id: String,
+    /// `None` targets the workspace identity directory; `Some` targets one
+    /// tab's own directory, which can be a different repository entirely.
+    tab_idx: Option<usize>,
     resolved_identity_cwd: PathBuf,
     cache_key_hint: Option<PathBuf>,
 }
@@ -16,6 +19,7 @@ struct WorkspaceGitRefreshItem {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct WorkspaceGitRefreshTarget {
     workspace_id: String,
+    tab_idx: Option<usize>,
     resolved_identity_cwd: PathBuf,
 }
 
@@ -108,26 +112,77 @@ impl App {
                 _ => {}
             }
         }
+        for token in self.state.sidebar_spaces.tab_rows.iter().flatten() {
+            match token.parts().0 {
+                crate::config::TabSidebarToken::Branch => demand.branch = true,
+                crate::config::TabSidebarToken::GitStatus => demand.ahead_behind = true,
+                _ => {}
+            }
+        }
         demand
+    }
+
+    /// Whether any configured per-tab row asks for Git values. Per-tab
+    /// resolution costs one extra item per tab, so it stays off until a layout
+    /// actually needs it.
+    fn tab_git_refresh_enabled(&self) -> bool {
+        self.state
+            .sidebar_spaces
+            .tab_rows
+            .iter()
+            .flatten()
+            .any(|token| {
+                matches!(
+                    token.parts().0,
+                    crate::config::TabSidebarToken::Branch
+                        | crate::config::TabSidebarToken::GitStatus
+                )
+            })
     }
 
     fn workspace_git_refresh_items(
         &self,
         refresh_repo_discovery: bool,
     ) -> Vec<WorkspaceGitRefreshItem> {
+        let per_tab = self.tab_git_refresh_enabled();
         self.state
             .workspaces
             .iter()
-            .filter_map(|ws| {
-                let cwd =
-                    ws.resolved_identity_cwd_from(&self.state.terminals, &self.terminal_runtimes)?;
-                let cache_key_hint = (!refresh_repo_discovery && ws.cached_identity_cwd == cwd)
-                    .then(|| ws.cached_git_status_key.clone());
-                Some(WorkspaceGitRefreshItem {
-                    workspace_id: ws.id.clone(),
-                    resolved_identity_cwd: cwd,
-                    cache_key_hint,
-                })
+            .flat_map(|ws| {
+                let identity = ws
+                    .resolved_identity_cwd_from(&self.state.terminals, &self.terminal_runtimes)
+                    .map(|cwd| {
+                        let cache_key_hint = (!refresh_repo_discovery
+                            && ws.cached_identity_cwd == cwd)
+                            .then(|| ws.cached_git_status_key.clone());
+                        WorkspaceGitRefreshItem {
+                            workspace_id: ws.id.clone(),
+                            tab_idx: None,
+                            resolved_identity_cwd: cwd,
+                            cache_key_hint,
+                        }
+                    });
+                let tabs = per_tab
+                    .then(|| {
+                        ws.tabs
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(tab_idx, tab)| {
+                                let cwd = tab.resolved_git_cwd(
+                                    &self.state.terminals,
+                                    &self.terminal_runtimes,
+                                )?;
+                                Some(WorkspaceGitRefreshItem {
+                                    workspace_id: ws.id.clone(),
+                                    tab_idx: Some(tab_idx),
+                                    resolved_identity_cwd: cwd,
+                                    cache_key_hint: None,
+                                })
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                identity.into_iter().chain(tabs)
             })
             .collect()
     }
@@ -148,6 +203,7 @@ fn deduplicate_git_refresh_items(
         });
         let target = WorkspaceGitRefreshTarget {
             workspace_id: item.workspace_id,
+            tab_idx: item.tab_idx,
             resolved_identity_cwd: item.resolved_identity_cwd,
         };
         if let Some(&index) = indexes.get(&cache_key) {
@@ -188,6 +244,7 @@ fn refresh_workspace_git_statuses_with_cache_and_demand(
         results.extend(job.targets.into_iter().map(move |target| {
             snapshot.clone().into_workspace_status(
                 target.workspace_id,
+                target.tab_idx,
                 target.resolved_identity_cwd,
                 job.cache_key.clone(),
                 demand,
@@ -225,11 +282,13 @@ mod tests {
             vec![
                 WorkspaceGitRefreshItem {
                     workspace_id: "one".into(),
+                    tab_idx: None,
                     resolved_identity_cwd: nested.clone(),
                     cache_key_hint: None,
                 },
                 WorkspaceGitRefreshItem {
                     workspace_id: "two".into(),
+                    tab_idx: None,
                     resolved_identity_cwd: other.clone(),
                     cache_key_hint: None,
                 },
@@ -275,6 +334,7 @@ mod tests {
             .into_iter()
             .map(|name| WorkspaceGitRefreshItem {
                 workspace_id: name.into(),
+                tab_idx: None,
                 resolved_identity_cwd: cache_key.join(name),
                 cache_key_hint: Some(cache_key.clone()),
             })
@@ -388,6 +448,38 @@ mod tests {
 
         assert!(!app.git_refresh_in_flight);
         assert!(app.event_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn tab_git_items_are_collected_only_when_tab_rows_ask_for_git() {
+        let mut config = crate::config::Config::default();
+        config.ui.sidebar.spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]];
+        config.ui.sidebar.spaces.tab_rows = vec![vec![crate::config::TabSidebarToken::Tab]];
+        let mut app = test_app(&config);
+        let mut ws = Workspace::test_new("test");
+        ws.test_add_tab(Some("second"));
+        app.state.workspaces.push(ws);
+        app.state.ensure_test_terminals();
+
+        // A per-tab layout without Git tokens must not widen Git work.
+        assert!(!app.tab_git_refresh_enabled());
+        let items = app.workspace_git_refresh_items(false);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].tab_idx, None);
+
+        app.state.sidebar_spaces.tab_rows = vec![vec![
+            crate::config::TabSidebarToken::Tab,
+            crate::config::TabSidebarToken::Branch,
+        ]];
+
+        assert!(app.tab_git_refresh_enabled());
+        let items = app.workspace_git_refresh_items(false);
+        // one workspace identity item plus one per tab
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].tab_idx, None);
+        assert_eq!(items[1].tab_idx, Some(0));
+        assert_eq!(items[2].tab_idx, Some(1));
+        assert!(app.git_refresh_demand().branch);
     }
 
     #[test]

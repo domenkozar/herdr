@@ -1,7 +1,7 @@
 use super::AgentPanelEntry;
 use crate::config::{
     AgentSidebarToken, AgentsSidebarConfig, SidebarTokenStyle, SpaceSidebarToken,
-    SpacesSidebarConfig,
+    SpacesSidebarConfig, TabSidebarToken,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +79,72 @@ pub(super) fn agent_rows(
                             .cloned()
                             .map(ResolvedTokenKind::Custom),
                         AgentSidebarToken::Styled { .. } => None,
+                    }?;
+                    Some(ResolvedToken::new(kind, style))
+                })
+                .collect::<Vec<_>>();
+            (!resolved.is_empty()).then_some(resolved)
+        })
+        .collect()
+}
+
+pub(super) struct TabTokenContext<'a> {
+    pub workspace: &'a str,
+    pub tab: &'a str,
+    pub state_text: &'a str,
+    pub agent_label: Option<&'a str>,
+    pub terminal_title: Option<&'a str>,
+    pub terminal_title_stripped: Option<&'a str>,
+    pub branch: Option<&'a str>,
+    pub ahead_behind: Option<(usize, usize)>,
+    pub tokens: &'a std::collections::HashMap<String, String>,
+}
+
+pub(super) fn tab_rows(
+    config: &SpacesSidebarConfig,
+    context: TabTokenContext<'_>,
+) -> Vec<Vec<ResolvedToken>> {
+    config
+        .tab_rows
+        .iter()
+        .filter_map(|row| {
+            let resolved = row
+                .iter()
+                .filter_map(|configured| {
+                    let (token, style) = configured.parts();
+                    let kind = match token {
+                        TabSidebarToken::StateIcon => Some(ResolvedTokenKind::StateIcon),
+                        TabSidebarToken::StateText => {
+                            Some(ResolvedTokenKind::StateText(context.state_text.to_string()))
+                        }
+                        TabSidebarToken::Workspace => {
+                            Some(ResolvedTokenKind::Workspace(context.workspace.to_string()))
+                        }
+                        TabSidebarToken::Tab => {
+                            Some(ResolvedTokenKind::Tab(context.tab.to_string()))
+                        }
+                        TabSidebarToken::Agent => context
+                            .agent_label
+                            .map(|label| ResolvedTokenKind::Agent(label.to_string())),
+                        TabSidebarToken::TerminalTitle => context
+                            .terminal_title
+                            .map(|title| ResolvedTokenKind::TerminalTitle(title.to_string())),
+                        TabSidebarToken::TerminalTitleStripped => context
+                            .terminal_title_stripped
+                            .map(|title| ResolvedTokenKind::TerminalTitle(title.to_string())),
+                        TabSidebarToken::Branch => context
+                            .branch
+                            .map(|branch| ResolvedTokenKind::Branch(branch.to_string())),
+                        TabSidebarToken::GitStatus => context
+                            .ahead_behind
+                            .filter(|(ahead, behind)| *ahead > 0 || *behind > 0)
+                            .map(|(ahead, behind)| ResolvedTokenKind::GitStatus { ahead, behind }),
+                        TabSidebarToken::Custom(name) => context
+                            .tokens
+                            .get(name)
+                            .cloned()
+                            .map(ResolvedTokenKind::Custom),
+                        TabSidebarToken::Styled { .. } => None,
                     }?;
                     Some(ResolvedToken::new(kind, style))
                 })

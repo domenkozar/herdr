@@ -35,6 +35,21 @@ enum SplitCommand<'a> {
     },
 }
 
+/// Git facts for one tab's own working directory.
+///
+/// A tab can be started with its own `--cwd` and its shell can move elsewhere,
+/// so a tab is not guaranteed to share the workspace's repository. This cache is
+/// only populated when a layout asks for per-tab Git values; otherwise it stays
+/// empty and costs nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TabGitCache {
+    /// Working directory these values were resolved from. Results that arrive
+    /// for a different directory are stale and get dropped.
+    pub cwd: Option<PathBuf>,
+    pub branch: Option<String>,
+    pub ahead_behind: Option<(usize, usize)>,
+}
+
 pub struct Tab {
     pub custom_name: Option<String>,
     pub number: usize,
@@ -49,6 +64,7 @@ pub struct Tab {
     pub events: mpsc::Sender<AppEvent>,
     pub(crate) render_notify: Arc<Notify>,
     pub(crate) render_dirty: Arc<RenderSignal>,
+    pub(crate) git: TabGitCache,
 }
 
 impl Tab {
@@ -191,6 +207,7 @@ impl Tab {
                 events,
                 render_notify,
                 render_dirty,
+                git: TabGitCache::default(),
             },
             terminal,
             runtime,
@@ -484,6 +501,7 @@ impl Tab {
             events,
             render_notify,
             render_dirty,
+            git: TabGitCache::default(),
         }
     }
 
@@ -574,6 +592,18 @@ impl Tab {
                     .get(terminal_id)
                     .map(|terminal| terminal.cwd.clone())
             })
+    }
+
+    /// Working directory this tab's Git facts are resolved from.
+    ///
+    /// Uses the root pane rather than the focused pane so that moving focus
+    /// inside a tab never re-targets background Git work.
+    pub fn resolved_git_cwd(
+        &self,
+        terminals: &HashMap<TerminalId, TerminalState>,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+    ) -> Option<PathBuf> {
+        self.cwd_for_pane(self.root_pane, terminals, terminal_runtimes)
     }
 
     pub fn foreground_cwd_for_pane(

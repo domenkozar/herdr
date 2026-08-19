@@ -2443,6 +2443,7 @@ mod tests {
         app.handle_internal_event(AppEvent::GitStatusRefreshed {
             results: vec![crate::workspace::WorkspaceGitStatus {
                 workspace_id,
+                tab_idx: None,
                 resolved_identity_cwd: resolved_identity_cwd.clone(),
                 status_cache_key: resolved_identity_cwd,
                 demand: crate::workspace::GitStatusRefreshDemand::ALL,

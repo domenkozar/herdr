@@ -28,7 +28,7 @@ pub use self::{
         derive_label_from_cwd, fallback_label_from_cwd, git_branch, git_space_metadata,
         git_status_cache_key, GitSpaceMetadata, GitStatusCacheEntry, GitStatusRefreshDemand,
     },
-    tab::{NewPane, Tab},
+    tab::{NewPane, Tab, TabGitCache},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -42,6 +42,9 @@ pub struct WorktreeSpaceMembership {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceGitStatus {
+    /// Set when this result targets one tab's own working directory rather than
+    /// the workspace identity directory.
+    pub tab_idx: Option<usize>,
     pub workspace_id: String,
     pub resolved_identity_cwd: PathBuf,
     pub status_cache_key: PathBuf,
@@ -79,6 +82,7 @@ impl WorkspaceGitStatusSnapshot {
     pub fn into_workspace_status(
         self,
         workspace_id: String,
+        tab_idx: Option<usize>,
         resolved_identity_cwd: PathBuf,
         status_cache_key: PathBuf,
         demand: GitStatusRefreshDemand,
@@ -91,6 +95,7 @@ impl WorkspaceGitStatusSnapshot {
             })
             .unwrap_or_else(|| fallback_label_from_cwd(&resolved_identity_cwd));
         WorkspaceGitStatus {
+            tab_idx,
             workspace_id,
             resolved_identity_cwd,
             status_cache_key,
@@ -1285,6 +1290,7 @@ impl Workspace {
             events,
             render_notify,
             render_dirty,
+            git: TabGitCache::default(),
         };
         let mut public_pane_numbers = HashMap::new();
         public_pane_numbers.insert(tab.root_pane, 1);
@@ -1341,6 +1347,7 @@ impl Workspace {
             events,
             render_notify,
             render_dirty,
+            git: TabGitCache::default(),
         };
         self.next_public_tab_number += 1;
         self.register_new_pane(root_id);
