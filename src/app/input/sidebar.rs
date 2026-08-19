@@ -474,7 +474,7 @@ impl AppState {
             self.view.sidebar_rect,
             self.sidebar_section_split,
         );
-        let rect = crate::ui::agent_panel_toggle_rect(detail_area, self.agent_panel_sort);
+        let rect = crate::ui::agent_panel_toggle_rect(self, detail_area);
         rect.width > 0
             && col >= rect.x
             && col < rect.x + rect.width
@@ -493,6 +493,7 @@ impl AppState {
         let detail_area = self.agent_panel_rect();
         let metrics = crate::ui::agent_panel_scroll_metrics(self, detail_area);
         let body = crate::ui::agent_panel_body_rect(
+            self,
             detail_area,
             crate::ui::should_show_scrollbar(metrics),
         );
@@ -778,6 +779,7 @@ mod tests {
         let detail_area = app.state.agent_panel_rect();
         let metrics = crate::ui::agent_panel_scroll_metrics(&app.state, detail_area);
         let body = crate::ui::agent_panel_body_rect(
+            &app.state,
             detail_area,
             crate::ui::should_show_scrollbar(metrics),
         );
@@ -835,7 +837,7 @@ mod tests {
         });
         app.state.agent_panel_scroll = 10;
         let detail_area = app.state.agent_panel_rect();
-        let body = crate::ui::agent_panel_body_rect(detail_area, false);
+        let body = crate::ui::agent_panel_body_rect(&app.state, detail_area, false);
 
         assert_eq!(
             app.state.agent_detail_target_at(body.y),
@@ -856,7 +858,7 @@ mod tests {
             app.state.view.sidebar_rect,
             app.state.sidebar_section_split,
         );
-        let toggle = crate::ui::agent_panel_toggle_rect(detail_area, app.state.agent_panel_sort);
+        let toggle = crate::ui::agent_panel_toggle_rect(&app.state, detail_area);
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             toggle.x,
@@ -1029,7 +1031,7 @@ mod tests {
         app.state.agent_panel_scroll = 1;
 
         let detail_area = app.state.agent_panel_rect();
-        let body = crate::ui::agent_panel_body_rect(detail_area, true);
+        let body = crate::ui::agent_panel_body_rect(&app.state, detail_area, true);
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             body.x + 1,
