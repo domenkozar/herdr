@@ -19,6 +19,7 @@ use crate::terminal::TerminalRuntimeRegistry;
 
 const WORKSPACE_SECTION_HEADER_ROWS: u16 = 2;
 const AGENT_PANEL_HEADER_ROWS: u16 = 3;
+const AGENT_PANEL_DIVIDER_ROWS: u16 = 1;
 
 pub(crate) struct AgentPanelEntry {
     pub ws_idx: usize,
@@ -85,8 +86,20 @@ fn agent_panel_sort_label(sort: AgentPanelSort) -> &'static str {
     }
 }
 
-pub(crate) fn agent_panel_toggle_rect(area: Rect, sort: AgentPanelSort) -> Rect {
-    agent_panel_header_label_rect(area, agent_panel_sort_label(sort))
+fn agent_panel_header_rows(app: &AppState) -> u16 {
+    if app.sidebar_agents.show_header {
+        AGENT_PANEL_HEADER_ROWS
+    } else {
+        AGENT_PANEL_DIVIDER_ROWS
+    }
+}
+
+pub(crate) fn agent_panel_toggle_rect(app: &AppState, area: Rect) -> Rect {
+    if !app.sidebar_agents.show_header {
+        return Rect::default();
+    }
+
+    agent_panel_header_label_rect(area, agent_panel_sort_label(app.agent_panel_sort))
 }
 
 fn agent_panel_header_label_rect(area: Rect, label: &str) -> Rect {
@@ -531,12 +544,13 @@ pub(crate) fn workspace_list_scrollbar_rect(app: &AppState, area: Rect) -> Optio
     ))
 }
 
-pub(crate) fn agent_panel_body_rect(area: Rect, has_scrollbar: bool) -> Rect {
-    if area.width == 0 || area.height <= AGENT_PANEL_HEADER_ROWS {
+pub(crate) fn agent_panel_body_rect(app: &AppState, area: Rect, has_scrollbar: bool) -> Rect {
+    let header_rows = agent_panel_header_rows(app);
+    if area.width == 0 || area.height <= header_rows {
         return Rect::default();
     }
 
-    let body_y = area.y.saturating_add(AGENT_PANEL_HEADER_ROWS);
+    let body_y = area.y.saturating_add(header_rows);
     let body_height = (area.y + area.height).saturating_sub(body_y);
     let body_width = area.width.saturating_sub(u16::from(has_scrollbar));
     Rect::new(area.x, body_y, body_width, body_height)
@@ -572,7 +586,7 @@ pub(crate) fn agent_entry_gap(app: &AppState, entry_idx: usize, entry_count: usi
 }
 
 fn agent_panel_visible_count_from(app: &AppState, area: Rect, scroll: usize) -> usize {
-    let body = agent_panel_body_rect(area, false);
+    let body = agent_panel_body_rect(app, area, false);
     if body.width == 0 || body.height == 0 {
         return 0;
     }
@@ -595,7 +609,7 @@ fn agent_panel_visible_count_from(app: &AppState, area: Rect, scroll: usize) -> 
 }
 
 fn agent_panel_bottom_start(app: &AppState, area: Rect) -> usize {
-    let body = agent_panel_body_rect(area, false);
+    let body = agent_panel_body_rect(app, area, false);
     let entries = agent_panel_entries(app);
     let mut used_rows = 0u16;
     let mut start = entries.len();
@@ -646,7 +660,7 @@ pub(crate) fn agent_panel_scroll_metrics(app: &AppState, area: Rect) -> crate::p
 
 pub(crate) fn agent_panel_scrollbar_rect(app: &AppState, area: Rect) -> Option<Rect> {
     let metrics = agent_panel_scroll_metrics(app, area);
-    let body = agent_panel_body_rect(area, true);
+    let body = agent_panel_body_rect(app, area, true);
     (should_show_scrollbar(metrics) && body.width > 0 && body.height > 0).then_some(Rect::new(
         area.x + area.width.saturating_sub(1),
         body.y,
@@ -1447,36 +1461,38 @@ fn render_agent_detail(
         Rect::new(area.x, area.y, area.width, 1),
     );
 
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            " agents",
-            Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
-        )])),
-        Rect::new(area.x, area.y + 1, area.width, 1),
-    );
-    let control_label = active_agent_view_label(app)
-        .unwrap_or_else(|| agent_panel_sort_label(app.agent_panel_sort));
-    let toggle_rect = agent_panel_header_label_rect(area, control_label);
-    if toggle_rect != Rect::default() {
-        let color = if app.agent_view_override.is_some() {
-            p.accent
-        } else {
-            p.overlay0
-        };
+    if app.sidebar_agents.show_header {
         frame.render_widget(
-            Paragraph::new(Span::styled(
-                control_label,
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            ))
-            .alignment(Alignment::Right),
-            toggle_rect,
+            Paragraph::new(Line::from(vec![Span::styled(
+                " agents",
+                Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
+            )])),
+            Rect::new(area.x, area.y + 1, area.width, 1),
         );
+        let control_label = active_agent_view_label(app)
+            .unwrap_or_else(|| agent_panel_sort_label(app.agent_panel_sort));
+        let toggle_rect = agent_panel_header_label_rect(area, control_label);
+        if toggle_rect != Rect::default() {
+            let color = if app.agent_view_override.is_some() {
+                p.accent
+            } else {
+                p.overlay0
+            };
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    control_label,
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ))
+                .alignment(Alignment::Right),
+                toggle_rect,
+            );
+        }
     }
 
     let details = agent_panel_entries_from(app, terminal_runtimes);
     let metrics = agent_panel_scroll_metrics(app, area);
     let scrollbar_rect = agent_panel_scrollbar_rect(app, area);
-    let body = agent_panel_body_rect(area, should_show_scrollbar(metrics));
+    let body = agent_panel_body_rect(app, area, should_show_scrollbar(metrics));
     if body == Rect::default() {
         return;
     }
@@ -1672,7 +1688,7 @@ mod tests {
             .unwrap();
         let buffer = terminal.backend().buffer();
         let (_, agent_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
-        let body = agent_panel_body_rect(agent_area, false);
+        let body = agent_panel_body_rect(&app, agent_area, false);
 
         let first = row_text(buffer, body.y, 25);
         let second = row_text(buffer, body.y + 1, 25);
@@ -1723,7 +1739,7 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
             .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
         let (_, agent_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
-        let body = agent_panel_body_rect(agent_area, false);
+        let body = agent_panel_body_rect(&app, agent_area, false);
         let buffer = terminal.backend().buffer();
         let workspace = buffer[(find_symbol_x(buffer, body.y, body.width, "o"), body.y)].style();
         let agent = buffer[(find_symbol_x(buffer, body.y, body.width, "p"), body.y)].style();
@@ -1981,7 +1997,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         let area = Rect::new(0, 0, 20, 5);
         let metrics = agent_panel_scroll_metrics(&app, area);
-        let body = agent_panel_body_rect(area, false);
+        let body = agent_panel_body_rect(&app, area, false);
         let mut terminal = Terminal::new(TestBackend::new(20, 5)).unwrap();
         terminal
             .draw(|frame| render_agent_detail(&app, &TerminalRuntimeRegistry::new(), frame, area))
@@ -1992,6 +2008,48 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert_eq!(metrics.max_offset_from_bottom, 0);
         assert_eq!(row_text(buffer, body.y, body.width), " pi");
         assert_eq!(row_text(buffer, body.y + 1, body.width), " claude");
+    }
+
+    #[test]
+    fn hidden_agent_panel_header_drops_labels_and_reclaims_rows() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.ensure_test_terminals();
+        for (workspace, agent) in app.workspaces.iter().zip([Agent::Pi, Agent::Claude]) {
+            let pane_id = workspace.tabs[0].root_pane;
+            let terminal_id = workspace.tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(agent);
+        }
+        app.sidebar_agents.rows = vec![vec![crate::config::AgentSidebarToken::Agent]];
+        app.sidebar_agents.show_header = false;
+
+        let area = Rect::new(0, 0, 20, 5);
+        let body = agent_panel_body_rect(&app, area, false);
+        assert_eq!(body.y, area.y + AGENT_PANEL_DIVIDER_ROWS);
+        assert_eq!(body.height, 4);
+        assert_eq!(agent_panel_toggle_rect(&app, area), Rect::default());
+
+        let mut terminal = Terminal::new(TestBackend::new(20, 5)).unwrap();
+        terminal
+            .draw(|frame| render_agent_detail(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+
+        assert_eq!(row_text(buffer, body.y, body.width), " pi");
+        assert_eq!(row_text(buffer, body.y + 1, body.width), " claude");
+        for row in area.y..area.y + area.height {
+            let text = row_text(buffer, row, area.width);
+            assert!(
+                !text.contains("agents"),
+                "row {row} still renders the title"
+            );
+            assert!(
+                !text.contains("grouped"),
+                "row {row} still renders the sort"
+            );
+        }
     }
 
     #[test]
@@ -2014,7 +2072,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .unwrap();
         let buffer = terminal.backend().buffer();
         let (_, agent_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
-        let body = agent_panel_body_rect(agent_area, false);
+        let body = agent_panel_body_rect(&app, agent_area, false);
         let first = row_text(buffer, body.y, 17);
 
         assert!(first.contains("logs"), "rendered row: {first:?}");
@@ -2044,7 +2102,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
         let (_, agent_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
-        let body = agent_panel_body_rect(agent_area, false);
+        let body = agent_panel_body_rect(&app, agent_area, false);
         let rendered = row_text(renderer.backend().buffer(), body.y, 9);
 
         assert!(!rendered.contains('⠋'));
@@ -2154,8 +2212,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert_eq!(metrics.max_offset_from_bottom, 0);
         let entry = agent_panel_entries(&app).pop().unwrap();
         assert_eq!(
-            agent_entry_height_in_body(&app, &entry, agent_panel_body_rect(panel, false).height),
-            agent_panel_body_rect(panel, false).height
+            agent_entry_height_in_body(
+                &app,
+                &entry,
+                agent_panel_body_rect(&app, panel, false).height
+            ),
+            agent_panel_body_rect(&app, panel, false).height
         );
     }
 

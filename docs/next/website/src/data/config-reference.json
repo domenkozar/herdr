@@ -828,6 +828,12 @@
           "description": "Complete Agent-row overrides keyed by strict canonical agent id. Agents without an override use ui.sidebar.agents.rows."
         },
         {
+          "key": "ui.sidebar.agents.show_header",
+          "type": "boolean",
+          "default": "true",
+          "description": "Draw the Agent panel header: the \"agents\" title and the sort toggle beside it. Set to false to hide both and give those two rows to the agent list. The sort toggle is mouse-only, so hiding it pins ordering to ui.agent_panel_sort."
+        },
+        {
           "key": "ui.sidebar.spaces.row_gap",
           "type": "integer",
           "default": "0",

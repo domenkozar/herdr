@@ -377,6 +377,7 @@ pub struct AgentsSidebarConfig {
     #[serde(default, deserialize_with = "deserialize_rows_by_agent")]
     pub rows_by_agent: BTreeMap<String, AgentSidebarRows>,
     pub row_gap: u16,
+    pub show_header: bool,
 }
 
 impl AgentsSidebarConfig {
@@ -400,6 +401,7 @@ impl Default for AgentsSidebarConfig {
             ],
             rows_by_agent: BTreeMap::new(),
             row_gap: DEFAULT_SIDEBAR_ROW_GAP,
+            show_header: true,
         }
     }
 }
@@ -451,6 +453,7 @@ mod tests {
         );
         assert!(config.agents.rows_by_agent.is_empty());
         assert_eq!(config.agents.row_gap, 0);
+        assert!(config.agents.show_header);
         assert_eq!(
             config.spaces.rows,
             vec![
@@ -459,6 +462,26 @@ mod tests {
             ]
         );
         assert_eq!(config.spaces.row_gap, 0);
+    }
+
+    #[test]
+    fn agents_show_header_defaults_on_and_parses_off() {
+        let config: crate::config::Config = toml::from_str(
+            r#"
+[ui.sidebar.agents]
+show_header = false
+"#,
+        )
+        .expect("sidebar header config");
+
+        assert!(!config.ui.sidebar.agents.show_header);
+        assert!(
+            crate::config::Config::default()
+                .ui
+                .sidebar
+                .agents
+                .show_header
+        );
     }
 
     #[test]
