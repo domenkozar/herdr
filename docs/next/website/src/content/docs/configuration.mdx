@@ -473,6 +473,32 @@ Use `herdr workspace report-metadata` in the same way for custom Space tokens. U
 
 Metadata reporters provide values only; styling stays in the local sidebar configuration. See [CLI reference: report metadata](/docs/cli-reference/#panes) for limits, clearing, sequencing, and expiry.
 
+### Hiding the Agent panel
+
+`ui.sidebar.agents.show_header` hides the Agent panel's title and sort toggle.
+To remove the panel altogether, set `ui.sidebar.agents.show`:
+
+```toml
+[ui.sidebar.agents]
+show = false
+```
+
+The Space list then takes the full sidebar height and the section divider
+disappears, so there is nothing left to drag or click. This pairs naturally with
+`tab_rows`, which already puts per-tab agent state in the Space list:
+
+```toml
+[ui.sidebar.spaces]
+rows = [["state_icon", "workspace", "state_text"]]
+tab_rows = [["state_icon", "branch"]]
+
+[ui.sidebar.agents]
+show = false
+```
+
+Unlike the row layouts, this one applies to the narrow sidebar too, which
+otherwise shows its own compact agent list.
+
 Sidebar row settings affect only the expanded desktop sidebar. Collapsed and mobile views keep their compact layouts.
 
 ## Notifications

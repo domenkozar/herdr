@@ -474,6 +474,10 @@ pub struct AgentsSidebarConfig {
     pub rows_by_agent: BTreeMap<String, AgentSidebarRows>,
     pub row_gap: u16,
     pub show_header: bool,
+    /// Whether the Agent panel occupies the lower half of the expanded sidebar
+    /// at all. When false the Space list takes the full sidebar height and the
+    /// section divider disappears, so there is nothing left to drag or click.
+    pub show: bool,
 }
 
 impl AgentsSidebarConfig {
@@ -498,6 +502,7 @@ impl Default for AgentsSidebarConfig {
             rows_by_agent: BTreeMap::new(),
             row_gap: DEFAULT_SIDEBAR_ROW_GAP,
             show_header: true,
+            show: true,
         }
     }
 }

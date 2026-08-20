@@ -162,26 +162,24 @@ impl App {
                             cache_key_hint,
                         }
                     });
-                let tabs = per_tab
-                    .then(|| {
-                        ws.tabs
-                            .iter()
-                            .enumerate()
-                            .filter_map(|(tab_idx, tab)| {
-                                let cwd = tab.resolved_git_cwd(
-                                    &self.state.terminals,
-                                    &self.terminal_runtimes,
-                                )?;
-                                Some(WorkspaceGitRefreshItem {
-                                    workspace_id: ws.id.clone(),
-                                    tab_idx: Some(tab_idx),
-                                    resolved_identity_cwd: cwd,
-                                    cache_key_hint: None,
-                                })
+                let tabs = if per_tab {
+                    ws.tabs
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(tab_idx, tab)| {
+                            let cwd = tab
+                                .resolved_git_cwd(&self.state.terminals, &self.terminal_runtimes)?;
+                            Some(WorkspaceGitRefreshItem {
+                                workspace_id: ws.id.clone(),
+                                tab_idx: Some(tab_idx),
+                                resolved_identity_cwd: cwd,
+                                cache_key_hint: None,
                             })
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                };
                 identity.into_iter().chain(tabs)
             })
             .collect()

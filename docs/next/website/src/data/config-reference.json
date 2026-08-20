@@ -834,6 +834,12 @@
           "description": "Draw the Agent panel header: the \"agents\" title and the sort toggle beside it. Set to false to hide both and give those two rows to the agent list. The sort toggle is mouse-only, so hiding it pins ordering to ui.agent_panel_sort."
         },
         {
+          "key": "ui.sidebar.agents.show",
+          "type": "boolean",
+          "default": "true",
+          "description": "Show the Agent panel at all. Set to false to hide it entirely, giving the Space list the full sidebar height and removing the section divider, so there is nothing left to drag or click. Useful when ui.sidebar.spaces.tab_rows already shows per-tab agent state."
+        },
+        {
           "key": "ui.sidebar.spaces.row_gap",
           "type": "integer",
           "default": "0",
@@ -844,6 +850,12 @@
           "type": "list of token rows",
           "default": "[[\"state_icon\", \"workspace\"], [\"branch\", \"git_status\"]]",
           "description": "Expanded Space sidebar layout. Entries may be token strings or inline { token, fg, bold, dim } style tables. Supports built-in and $name metadata tokens; at most 16 rows and 16 tokens per row."
+        },
+        {
+          "key": "ui.sidebar.spaces.tab_rows",
+          "type": "list of token rows",
+          "default": "[]",
+          "description": "Rows rendered once per tab beneath each Space entry, showing that tab's own agent state instead of the Space-wide rollup. Empty disables per-tab rows. Accepts state_icon, state_text, workspace, tab, agent, terminal_title, terminal_title_stripped, branch, git_status, and $name pane metadata; branch and git_status resolve against each tab's own working directory."
         },
         {
           "key": "ui.accent",
