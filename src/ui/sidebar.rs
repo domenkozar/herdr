@@ -1346,20 +1346,19 @@ fn render_workspace_list(
             }
             let mut spans = Vec::new();
             let prefix_width = if card.indented {
-                spans.push(Span::raw("   "));
                 if row_index == 0 {
                     spans.push(Span::styled(
                         if is_last_child { "└─ " } else { "├─ " },
                         Style::default().fg(p.overlay0),
                     ));
-                    6
+                    3
                 } else if is_last_child {
                     spans.push(Span::raw("     "));
-                    8
+                    5
                 } else {
                     spans.push(Span::styled("│", Style::default().fg(p.overlay0)));
                     spans.push(Span::raw("    "));
-                    8
+                    5
                 }
             } else if row_index == 0 {
                 spans.push(Span::raw(" "));
@@ -2814,8 +2813,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let parent_name_x = find_symbol_x(buffer, cards[0].rect.y, cards[0].rect.width, "m");
         let plain_name_x = find_symbol_x(buffer, cards[3].rect.y, cards[3].rect.width, "n");
         assert_eq!(parent_name_x, plain_name_x);
-        assert_eq!(buffer[(cards[1].rect.x + 3, cards[1].rect.y)].symbol(), "├");
-        assert_eq!(buffer[(cards[2].rect.x + 3, cards[2].rect.y)].symbol(), "└");
+        assert_eq!(buffer[(cards[1].rect.x, cards[1].rect.y)].symbol(), "├");
+        assert_eq!(buffer[(cards[2].rect.x, cards[2].rect.y)].symbol(), "└");
         assert_eq!(
             buffer[(cards[0].rect.x + cards[0].rect.width - 1, cards[0].rect.y)].symbol(),
             "▾"
@@ -2852,7 +2851,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         let child = app.view.workspace_card_areas[1];
         assert_eq!(
-            terminal.backend().buffer()[(child.rect.x + 3, child.rect.y)].symbol(),
+            terminal.backend().buffer()[(child.rect.x, child.rect.y)].symbol(),
             "├"
         );
     }
