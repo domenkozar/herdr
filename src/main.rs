@@ -383,7 +383,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # [ui.sidebar.spaces]
 # Blank rows between space entries. Set to 1 to restore the previous spacing.
 # row_gap = 0
-# rows = [["state_icon", "workspace"], ["branch", "git_status"]]
+# rows = [["workspace"], ["branch", "state_icon", "git_status"]]
 
 # Accent color for highlights, borders, and navigation UI.
 # Accepts: hex (#89b4fa), named colors (cyan, blue, magenta), or rgb(r,g,b)
